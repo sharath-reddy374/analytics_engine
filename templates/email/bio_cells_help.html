@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Biology: Cells Help</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: #4CAF50; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+        .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px; }
+        .cta-button { display: inline-block; background: #4CAF50; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 5px; }
+        .footer { text-align: center; margin-top: 30px; font-size: 12px; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🧬 Biology: Cells Mastery</h1>
+    </div>
+    
+    <div class="content">
+        <h2>Hi {{ first_name }}!</h2>
+        
+        <p>I noticed your recent work in {{ topic }}. Most learners gain {{ expected_gain }} after ~15 minutes of focused practice.</p>
+        
+        <p>{{ llm_block }}</p>
+        
+        <h3>🎯 Quick Boost Resources:</h3>
+        <ul>
+            <li><strong>Cell Structure Practice:</strong> Interactive diagrams and labeling exercises</li>
+            <li><strong>Function Review:</strong> 5-minute video on organelle functions</li>
+            <li><strong>Quick Quiz:</strong> 10 questions to test your understanding</li>
+        </ul>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="{{ practice_link }}" class="cta-button">🧪 Start Practice Set</a>
+            <a href="{{ video_link }}" class="cta-button">📺 Watch 5-min Video</a>
+        </div>
+        
+        <p><strong>💡 Pro Tip:</strong> Focus on understanding how cell structure relates to function - this connection is key to mastering biology concepts!</p>
+        
+        <p>Reply to this email with any questions — I'll route it to your coach avatar.</p>
+        
+        <p>Keep exploring!<br>
+        — EdYou Team</p>
+    </div>
+    
+    <div class="footer">
+        <p>EdYou Learning Platform | Personalized Education</p>
+        <p><a href="{{ unsubscribe_link }}">Unsubscribe</a> | <a href="/preferences">Email Preferences</a></p>
+    </div>
+</body>
+</html>

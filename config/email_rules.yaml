@@ -1,0 +1,127 @@
+# Email Campaign Rules Configuration
+# Format: YAML with rule definitions
+
+rules:
+  - id: help_cells_bio
+    description: "Biology cells help for engaged learners"
+    when:
+      all:
+        - contains: { field: "top_topics", value: "Biology>Cells" }
+        - lt: { field: "emails_sent_7d", value: 2 }
+        - eq: { field: "unsubscribed", value: false }
+        - gte: { field: "frequency_7d", value: 2 }
+    action:
+      template_id: "bio_cells_help_v1"
+      priority: 90
+      cooldown_days: 3
+
+  - id: algebra_followup
+    description: "Algebra follow-up for recent learners"
+    when:
+      all:
+        - contains: { field: "top_topics", value: "Algebra" }
+        - gte: { field: "recency_days", value: 1 }
+        - lte: { field: "recency_days", value: 3 }
+        - eq: { field: "unsubscribed", value: false }
+    action:
+      template_id: "algebra_next_steps_v1"
+      priority: 80
+      cooldown_days: 3
+
+  - id: marketing_basics_boost
+    description: "Marketing basics encouragement"
+    when:
+      all:
+        - contains: { field: "top_topics", value: "Marketing" }
+        - gte: { field: "tests_7d", value: 1 }
+        - eq: { field: "unsubscribed", value: false }
+    action:
+      template_id: "marketing_boost_v1"
+      priority: 75
+      cooldown_days: 5
+
+  - id: test_performance_help
+    description: "Help for struggling test takers"
+    when:
+      all:
+        - gte: { field: "tests_7d", value: 3 }
+        - lt: { field: "avg_score_change_30d", value: 0 }
+        - eq: { field: "unsubscribed", value: false }
+    action:
+      template_id: "test_improvement_v1"
+      priority: 85
+      cooldown_days: 7
+
+  - id: presentation_incomplete
+    description: "Nudge for incomplete presentations"
+    when:
+      all:
+        - gte: { field: "minutes_7d", value: 5 }
+        - lt: { field: "minutes_7d", value: 30 }
+        - gte: { field: "recency_days", value: 2 }
+        - eq: { field: "unsubscribed", value: false }
+    action:
+      template_id: "continue_learning_v1"
+      priority: 70
+      cooldown_days: 4
+
+  - id: high_engagement_reward
+    description: "Reward for highly engaged learners"
+    when:
+      all:
+        - gte: { field: "frequency_7d", value: 10 }
+        - gte: { field: "minutes_7d", value: 60 }
+        - gt: { field: "convo_sentiment_7d_avg", value: 0.3 }
+        - eq: { field: "unsubscribed", value: false }
+    action:
+      template_id: "engagement_reward_v1"
+      priority: 95
+      cooldown_days: 14
+
+  - id: sentiment_recovery
+    description: "Support for frustrated learners"
+    when:
+      all:
+        - lt: { field: "convo_sentiment_7d_avg", value: -0.2 }
+        - gte: { field: "frequency_7d", value: 2 }
+        - eq: { field: "unsubscribed", value: false }
+    action:
+      template_id: "learning_support_v1"
+      priority: 88
+      cooldown_days: 5
+
+  - id: winback_idle
+    description: "Win back idle users"
+    when:
+      all:
+        - gte: { field: "recency_days", value: 7 }
+        - lte: { field: "recency_days", value: 30 }
+        - eq: { field: "unsubscribed", value: false }
+    action:
+      template_id: "winback_study_plan_v1"
+      priority: 60
+      cooldown_days: 7
+
+  - id: churn_prevention_high_risk
+    description: "Prevent churn for high-risk users"
+    when:
+      all:
+        - eq: { field: "churn_risk", value: "high" }
+        - eq: { field: "unsubscribed", value: false }
+        - lt: { field: "emails_sent_7d", value: 1 }
+    action:
+      template_id: "churn_prevention_v1"
+      priority: 92
+      cooldown_days: 3
+
+  - id: subject_mastery_celebration
+    description: "Celebrate subject mastery"
+    when:
+      all:
+        - gte: { field: "tests_7d", value: 5 }
+        - gt: { field: "avg_score_change_30d", value: 0.2 }
+        - eq: { field: "unsubscribed", value: false }
+    action:
+      template_id: "mastery_celebration_v1"
+      priority: 78
+      cooldown_days: 10

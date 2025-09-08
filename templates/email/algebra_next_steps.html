@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Algebra Next Steps</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: #2196F3; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+        .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px; }
+        .cta-button { display: inline-block; background: #2196F3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 5px; }
+        .progress-bar { background: #e0e0e0; height: 8px; border-radius: 4px; margin: 15px 0; }
+        .progress-fill { background: #2196F3; height: 100%; border-radius: 4px; width: 65%; }
+        .footer { text-align: center; margin-top: 30px; font-size: 12px; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 Algebra Progress Update</h1>
+    </div>
+    
+    <div class="content">
+        <h2>Great work, {{ first_name }}! 🎉</h2>
+        
+        <p>{{ llm_block }}</p>
+        
+        <h3>📈 Your Progress:</h3>
+        <div class="progress-bar">
+            <div class="progress-fill"></div>
+        </div>
+        <p><small>65% through Algebra fundamentals</small></p>
+        
+        <h3>🎯 Ready for Your Next Challenge:</h3>
+        <ul>
+            <li><strong>Distributive Property:</strong> Master expanding expressions like 3(x + 4)</li>
+            <li><strong>Combining Like Terms:</strong> Simplify complex algebraic expressions</li>
+            <li><strong>Real-World Applications:</strong> See algebra in action with word problems</li>
+        </ul>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="{{ practice_link }}" class="cta-button">🧮 Continue Practice</a>
+            <a href="{{ video_link }}" class="cta-button">📺 Watch Tutorial</a>
+        </div>
+        
+        <div style="background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <p><strong>💡 Study Tip:</strong> Practice distributive property for 10 minutes daily. Most students see {{ expected_gain }} with consistent practice!</p>
+        </div>
+        
+        <p>Questions? Just reply to this email!</p>
+        
+        <p>Keep calculating!<br>
+        — EdYou Team</p>
+    </div>
+    
+    <div class="footer">
+        <p>EdYou Learning Platform | Personalized Education</p>
+        <p><a href="{{ unsubscribe_link }}">Unsubscribe</a> | <a href="/preferences">Email Preferences</a></p>
+    </div>
+</body>
+</html>
