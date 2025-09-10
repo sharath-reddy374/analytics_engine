@@ -378,3 +378,88 @@ class LLMService:
             return f"Great progress on {context}, {first_name}! You're doing excellent work - let's keep the momentum going with the next section."
         else:
             return f"Keep up the fantastic work on {context}, {first_name}! Your dedication to learning is inspiring, and I'm here to support your success."
+
+    async def generate_educational_email(self, rule_id: str, user_features: Dict[str, Any], user_email: str) -> Dict[str, str]:
+        """
+        Generate educational email content based on rule and user features
+        """
+        try:
+            # Extract user context
+            first_name = user_features.get('first_name', user_email.split('@')[0].title())
+            top_topics = user_features.get('top_topics', [])
+            engagement_level = 'high' if user_features.get('frequency_7d', 0) > 50 else 'medium'
+            course_completion = user_features.get('icp_completion_rate', 0)
+            test_accuracy = user_features.get('test_accuracy', 0)
+            
+            # Create context-aware prompt
+            prompt = f"""
+            Generate a personalized educational email for a student:
+            
+            Student: {first_name}
+            Email Rule: {rule_id}
+            Learning Topics: {', '.join(top_topics[:3]) if top_topics else 'General studies'}
+            Engagement Level: {engagement_level}
+            Course Progress: {course_completion:.0f}%
+            Test Performance: {test_accuracy:.0%}
+            
+            Create an encouraging, educational email that:
+            - Is appropriate for K4-graduate level students
+            - Addresses their specific learning context
+            - Provides actionable next steps
+            - Is 2-3 sentences maximum
+            - Has an engaging subject line
+            
+            Return JSON format:
+            {{
+                "subject": "Engaging subject line",
+                "content": "Personalized email content"
+            }}
+            """
+            
+            if self.client:
+                response = self.client.chat.completions.create(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=200
+                )
+                
+                import json
+                result = json.loads(response.choices[0].message.content)
+                return {
+                    'subject': result.get('subject', f'Keep learning, {first_name}!'),
+                    'content': result.get('content', f'Great work on your studies, {first_name}!')
+                }
+            else:
+                # Fallback educational email generation
+                return self._generate_fallback_educational_email(rule_id, user_features, first_name)
+                
+        except Exception as e:
+            logger.error(f"Failed to generate educational email: {str(e)}")
+            return self._generate_fallback_educational_email(rule_id, user_features, first_name)
+    
+    def _generate_fallback_educational_email(self, rule_id: str, user_features: Dict[str, Any], first_name: str) -> Dict[str, str]:
+        """Generate fallback educational email when OpenAI is unavailable"""
+        top_topics = user_features.get('top_topics', [])
+        course_completion = user_features.get('icp_completion_rate', 0)
+        
+        if 'engagement' in rule_id:
+            subject = f"Amazing progress, {first_name}! 🎓"
+            content = f"Hi {first_name}! Your dedication to learning is impressive. Keep up the excellent work on {top_topics[0] if top_topics else 'your studies'} - you're making real progress!"
+        elif 'biology' in rule_id or any('Biology' in topic for topic in top_topics):
+            subject = f"Biology study boost for {first_name}"
+            content = f"Hey {first_name}! I see you're diving deep into biology concepts. Here are some practice questions to reinforce your understanding of cellular processes."
+        elif 'history' in rule_id or any('History' in topic for topic in top_topics):
+            subject = f"History insights for {first_name}"
+            content = f"Hi {first_name}! Your exploration of historical topics is fascinating. Let's connect those ancient civilizations to modern concepts you're studying."
+        elif course_completion > 0:
+            subject = f"You're {course_completion:.0f}% there, {first_name}!"
+            content = f"Great job reaching {course_completion:.0f}% completion, {first_name}! Your consistent effort is paying off - let's tackle the next section together."
+        else:
+            subject = f"Keep learning, {first_name}!"
+            content = f"Hi {first_name}! Your learning journey is unique and valuable. I'm here to support you every step of the way with personalized guidance."
+        
+        return {
+            'subject': subject,
+            'content': content
+        }

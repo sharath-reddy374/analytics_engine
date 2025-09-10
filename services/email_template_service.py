@@ -62,13 +62,17 @@ class EmailTemplateService:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 email_result = loop.run_until_complete(
-                    self.llm_service.generate_educational_email(email_context)
+                    self.llm_service.generate_educational_email(
+                        template_id,  # rule_id
+                        features,     # user_features
+                        features.get('email', 'student@example.com')  # user_email
+                    )
                 )
                 loop.close()
                 
                 return {
                     'subject': email_result.get('subject', 'Your Learning Journey Continues!'),
-                    'content': email_result.get('content', self._generate_fallback_content(email_context)),
+                    'content': email_result.get('content', self._generate_educational_fallback(email_context)),
                     'template_id': template_id,
                     'generated_at': datetime.now().isoformat()
                 }
