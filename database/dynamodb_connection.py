@@ -58,7 +58,7 @@ def get_dynamodb_client():
 def verify_existing_tables():
     """Verify all required tables exist"""
     required_tables = [
-        'investor_prod',
+        'Investor_Prod',
         'InvestorLoginHistory_Prod', 
         'User_Infinite_TestSeries_Prod',
         'TestSereiesRecord_Prod',

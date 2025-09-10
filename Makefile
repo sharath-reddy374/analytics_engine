@@ -1,41 +1,30 @@
-.PHONY: help install dev test clean docker-up docker-down seed-data run-pipeline process-user format lint setup-dev docker-clean
+.PHONY: help install dev test clean seed-data run-pipeline process-user format lint setup-dev test-connection
 
 help:
 	@echo "EdYou AI Engine - Available commands:"
-	@echo "  install     - Install Python dependencies"
-	@echo "  dev         - Run development server"
-	@echo "  test        - Run tests"
-	@echo "  docker-up   - Start all services with Docker Compose"
-	@echo "  docker-down - Stop all Docker services"
-	@echo "  seed-data   - Seed database with sample data"
-	@echo "  run-pipeline - Run daily pipeline manually"
-	@echo "  process-user - Process a single user by email"
-	@echo "  clean       - Clean up temporary files"
-	@echo "  format      - Format code"
-	@echo "  lint        - Lint code"
-	@echo "  setup-dev   - Set up development environment"
-	@echo "  docker-clean - Remove orphan containers and unused resources"
+	@echo "  install        - Install Python dependencies"
+	@echo "  dev            - Run development server locally"
+	@echo "  test           - Run tests"
+	@echo "  test-connection - Test DynamoDB connection"
+	@echo "  seed-data      - Seed database with sample data"
+	@echo "  run-pipeline   - Run daily pipeline manually"
+	@echo "  process-user   - Process a single user by email"
+	@echo "  clean          - Clean up temporary files"
+	@echo "  format         - Format code"
+	@echo "  lint           - Lint code"
+	@echo "  setup-dev      - Set up development environment"
 
 install:
 	pip install -r requirements.txt
 
 dev:
-	python run.py
+	python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 
 test:
 	pytest tests/ -v
 
-docker-up:
-	docker-compose up -d --remove-orphans
-	@echo "Services starting... Wait 30 seconds then run 'make process-user EMAIL=your@email.com'"
-
-docker-down:
-	docker-compose down --remove-orphans
-
-docker-clean:
-	docker-compose down --remove-orphans
-	docker system prune -f
-	docker volume prune -f
+test-connection:
+	python scripts/test_dynamodb_connection.py
 
 seed-data:
 	python scripts/seed_sample_data.py
@@ -48,7 +37,7 @@ process-user:
 		echo "Usage: make process-user EMAIL=user@example.com"; \
 		exit 1; \
 	fi
-	docker-compose exec edyou-engine python scripts/process_single_user.py $(EMAIL)
+	python scripts/process_single_user.py $(EMAIL)
 
 clean:
 	find . -type f -name "*.pyc" -delete
@@ -66,4 +55,12 @@ lint:
 	mypy .
 
 setup-dev: install
-	pre-commit install
+	@echo "Setting up development environment..."
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		echo "Created .env file from .env.example"; \
+		echo "Please update .env with your AWS credentials"; \
+	fi
+	@echo "Development environment ready!"
+	@echo "Run 'make test-connection' to verify DynamoDB access"
+	@echo "Run 'make dev' to start the server"

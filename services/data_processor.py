@@ -42,57 +42,127 @@ class DataProcessor:
         """Convert conversation history to normalized events"""
         events = []
         
-        for record in conversation_data:
+        print(f"🔍 Processing {len(conversation_data)} conversation records...")
+        
+        for idx, record in enumerate(conversation_data):
             try:
-                # Parse the conversation data
-                data = json.loads(record.get('data', '{}')) if isinstance(record.get('data'), str) else record.get('data', {})
-                chat_history = data.get('conversation_history', {}).get('chat_history', [])
+                print(f"📝 Processing record {idx + 1}: type={type(record)}")
                 
-                session_id = self._generate_session_id(record.get('timestamp', ''), data.get('email', ''))
+                if isinstance(record, list):
+                    print(f"⚠️ Record is a list with {len(record)} items, skipping...")
+                    continue
                 
-                # Process each message pair
-                for i in range(0, len(chat_history), 2):
-                    if i + 1 < len(chat_history):
-                        user_msg = chat_history[i]
-                        ai_msg = chat_history[i + 1]
-                        
-                        # User message event
+                if not isinstance(record, dict):
+                    print(f"⚠️ Record is not a dict: {type(record)}, skipping...")
+                    continue
+                
+                print(f"📋 Record keys: {list(record.keys())}")
+                
+                conversation_list = []
+                user_email = record.get('email', '')
+                timestamp = record.get('time', record.get('timestamp', record.get('created_at', '')))
+                
+                # The user's data structure has 'data' as a list of conversation objects
+                if 'data' in record:
+                    data_field = record['data']
+                    print(f"📊 Found 'data' field of type: {type(data_field)}")
+                    
+                    if isinstance(data_field, list):
+                        # This is the correct structure for the user's data
+                        conversation_list = data_field
+                        print(f"✅ Found conversation list with {len(conversation_list)} messages")
+                    elif isinstance(data_field, str):
+                        try:
+                            data = json.loads(data_field)
+                            if isinstance(data, list):
+                                conversation_list = data
+                                print(f"✅ Parsed JSON conversation list with {len(conversation_list)} messages")
+                            else:
+                                print(f"❌ Parsed JSON is not a list: {type(data)}")
+                                continue
+                        except json.JSONDecodeError as e:
+                            print(f"❌ Failed to parse JSON data: {e}")
+                            continue
+                    else:
+                        print(f"❌ Data field is unexpected type: {type(data_field)}")
+                        continue
+                
+                # Fallback: Direct conversation field
+                elif 'conversation' in record:
+                    conversation_list = record['conversation']
+                    print(f"✅ Found direct 'conversation' field with {len(conversation_list) if isinstance(conversation_list, list) else 'non-list'} items")
+                
+                if not isinstance(conversation_list, list):
+                    print(f"❌ Conversation data is not a list: {type(conversation_list)}")
+                    continue
+                
+                if not conversation_list:
+                    print(f"⚠️ Empty conversation list")
+                    continue
+                
+                print(f"🎯 Processing {len(conversation_list)} conversation messages...")
+                
+                session_id = self._generate_session_id(timestamp, user_email)
+                
+                for i, message in enumerate(conversation_list):
+                    if not isinstance(message, dict):
+                        print(f"⚠️ Message {i} is not a dict: {type(message)}")
+                        continue
+                    
+                    print(f"💬 Message {i} keys: {list(message.keys())}")
+                    
+                    user_text = message.get('user', '')
+                    ai_text = message.get('bot', '')
+                    msg_time = message.get('time', timestamp)
+                    
+                    # Create user message event if user text exists
+                    if user_text and user_text.strip():
                         user_event = {
                             "event_id": self._generate_event_id(),
-                            "user_id": data.get('email', ''),
-                            "ts": self._parse_timestamp(record.get('timestamp', '')),
+                            "user_id": user_email,
+                            "ts": self._parse_timestamp(msg_time),
                             "name": "convo_msg",
                             "source": "web",
                             "session_id": session_id,
                             "props": {
                                 "role": "user",
-                                "text": user_msg.get('user', ''),
-                                "avatar": data.get('avatar', '')
+                                "content": user_text.strip(),
+                                "text": user_text.strip(),
+                                "message_index": i,
+                                "avatar": record.get('avatar', '')
                             }
                         }
                         events.append(user_event)
-                        
-                        # AI message event
-                        ai_text = self._clean_ssml(ai_msg.get('bot', ''))
+                        print(f"✅ Added user message: {user_text[:50]}...")
+                    
+                    # Create AI message event if AI text exists
+                    if ai_text and ai_text.strip():
+                        cleaned_ai_text = self._clean_ssml(ai_text)
                         ai_event = {
                             "event_id": self._generate_event_id(),
-                            "user_id": data.get('email', ''),
-                            "ts": self._parse_timestamp(record.get('timestamp', '')),
+                            "user_id": user_email,
+                            "ts": self._parse_timestamp(msg_time),
                             "name": "convo_msg",
                             "source": "web",
                             "session_id": session_id,
                             "props": {
                                 "role": "ai",
-                                "text": ai_text,
-                                "avatar": data.get('avatar', '')
+                                "content": cleaned_ai_text,
+                                "text": cleaned_ai_text,
+                                "message_index": i,
+                                "avatar": record.get('avatar', '')
                             }
                         }
                         events.append(ai_event)
+                        print(f"✅ Added AI message: {cleaned_ai_text[:50]}...")
                         
             except Exception as e:
-                print(f"Error processing conversation record: {e}")
+                print(f"❌ Error processing conversation record {idx}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
+        print(f"🎉 Generated {len(events)} conversation events total")
         return events
     
     def process_test_attempts(self, test_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -102,28 +172,41 @@ class DataProcessor:
         for record in test_data:
             try:
                 responses = record.get('Response', {})
+                user_email = record.get('email', '')
+                subject = record.get('Subject', 'Unknown')
                 
-                for timestamp, response_data in responses.items():
-                    if isinstance(response_data, list):
-                        for question_data in response_data:
-                            event = {
-                                "event_id": self._generate_event_id(),
-                                "user_id": record.get('email', ''),
-                                "ts": self._parse_timestamp(timestamp),
-                                "name": "test_attempt",
-                                "source": "web",
-                                "props": {
-                                    "series_id": record.get('series_id'),
-                                    "series_title": record.get('series_title'),
-                                    "subject": record.get('Subject'),
-                                    "question": question_data.get('Question'),
-                                    "response_idx": question_data.get('Response'),
-                                    "correct_idx": question_data.get('Correct_Answer'),
-                                    "is_correct": question_data.get('Response') == question_data.get('Correct_Answer'),
-                                    "topic": question_data.get('Topic')
-                                }
-                            }
-                            events.append(event)
+                if isinstance(responses, dict):
+                    for timestamp, response_list in responses.items():
+                        if isinstance(response_list, list):
+                            for response_data in response_list:
+                                if isinstance(response_data, dict):
+                                    # Extract actual response data structure
+                                    correct_response = response_data.get('Correct_Response')
+                                    user_response = response_data.get('Response')
+                                    question_text = response_data.get('Question', '')
+                                    
+                                    # Calculate if answer was correct
+                                    is_correct = (correct_response == user_response) if correct_response is not None else False
+                                    
+                                    event = {
+                                        "event_id": self._generate_event_id(),
+                                        "user_id": user_email,
+                                        "ts": self._parse_timestamp(timestamp),
+                                        "name": "test_attempt",
+                                        "source": "web",
+                                        "props": {
+                                            "Response": responses,  # Include full Response data for FeatureEngine
+                                            "Subject": subject,
+                                            "series_id": record.get('series_id', record.get('id')),
+                                            "series_title": record.get('series_title', record.get('title')),
+                                            "question": question_text,
+                                            "user_response": user_response,
+                                            "correct_response": correct_response,
+                                            "is_correct": is_correct,
+                                            "topic": response_data.get('Topic', subject)
+                                        }
+                                    }
+                                    events.append(event)
                             
             except Exception as e:
                 print(f"Error processing test record: {e}")
@@ -189,10 +272,68 @@ class DataProcessor:
         if user_data['learning_records']:
             all_events.extend(self.process_learning_records(user_data['learning_records']))
         
+        if user_data.get('course_plans'):
+            all_events.extend(self.process_icp_data(user_data['course_plans']))
+        
         # Sort events by timestamp
         all_events.sort(key=lambda x: x['ts'])
         
         return all_events
+    
+    def process_icp_data(self, icp_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert ICP (Individualized Course Plans) data to normalized events"""
+        events = []
+        
+        print(f"🎓 Processing {len(icp_data)} ICP course records...")
+        
+        for record in icp_data:
+            try:
+                user_email = record.get('email', '')
+                course_id = record.get('id', record.get('course_id', 'unknown'))
+                
+                # Extract status information from real ICP_Prod structure
+                status = record.get('status', {})
+                if isinstance(status, dict):
+                    completed_lessons = status.get('completedLesson', 0)
+                    if hasattr(completed_lessons, '__float__'):
+                        completed_lessons = float(completed_lessons)
+                    elif not isinstance(completed_lessons, (int, float)):
+                        completed_lessons = 0
+                    
+                    total_lessons = 25  # User specified: always divide by 25 for completion percentage
+                    current_lesson = status.get('currentLesson', 1)
+                    progress = status.get('progress', 0)
+                    
+                    completion_rate = float(completed_lessons) / 25.0
+                    
+                    print(f"📚 Course {course_id}: {completed_lessons}/25 lessons = {completion_rate:.1%} complete")
+                    
+                    # Create ICP progress event
+                    event = {
+                        "event_id": self._generate_event_id(),
+                        "user_id": user_email,
+                        "ts": self._parse_timestamp(record.get('created_at', record.get('updated_at', ''))),
+                        "name": "icp_progress",
+                        "source": "web",
+                        "props": {
+                            "id": course_id,
+                            "title": record.get('title', 'Unknown Course'),
+                            "status": status,  # Include full status for FeatureEngine
+                            "completed_lessons": float(completed_lessons),  # Convert to float
+                            "total_lessons": total_lessons,
+                            "current_lesson": current_lesson,
+                            "progress": progress,
+                            "completion_rate": completion_rate
+                        }
+                    }
+                    events.append(event)
+                    
+            except Exception as e:
+                print(f"❌ Error processing ICP record: {e}")
+                continue
+        
+        print(f"✅ Generated {len(events)} ICP progress events")
+        return events
     
     def _generate_event_id(self) -> str:
         """Generate a unique event ID"""

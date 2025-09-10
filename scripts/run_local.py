@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Local development runner for the EdYou AI Engine
-This script sets up and runs the engine for local testing with DynamoDB
+This script sets up and runs the engine for local testing with AWS DynamoDB
 """
 
 import sys
@@ -16,70 +16,77 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def check_dynamodb_local():
-    """Check if DynamoDB Local is running"""
-    try:
-        import requests
-        response = requests.get("http://localhost:8000", timeout=5)
-        return True
-    except:
-        return False
-
-def start_dynamodb_local():
-    """Instructions for starting DynamoDB Local"""
-    logger.info("DynamoDB Local is not running!")
-    logger.info("To start DynamoDB Local:")
-    logger.info("1. Download from: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html")
-    logger.info("2. Extract and run: java -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -sharedDb")
-    logger.info("3. Or use Docker: docker run -p 8000:8000 amazon/dynamodb-local")
-    return False
-
 def setup_environment():
     """Setup local environment"""
-    # Copy .env.local to .env if .env doesn't exist
     if not os.path.exists(".env"):
-        if os.path.exists(".env.local"):
+        if os.path.exists(".env.example"):
             import shutil
-            shutil.copy(".env.local", ".env")
-            logger.info("Copied .env.local to .env")
+            shutil.copy(".env.example", ".env")
+            logger.info("Copied .env.example to .env")
+            logger.warning("Please update .env with your AWS credentials before running")
+            return False
         else:
-            logger.warning("No .env.local file found. Please create one based on .env.example")
+            logger.error("No .env.example file found. Cannot create .env file")
             return False
     return True
 
-def run_engine():
-    """Run the AI engine"""
+def check_aws_credentials():
+    """Check if AWS credentials are configured"""
     try:
-        logger.info("Starting EdYou AI Engine...")
+        from config.settings import settings
+        if not settings.AWS_ACCESS_KEY_ID or not settings.AWS_SECRET_ACCESS_KEY:
+            logger.error("AWS credentials not configured in .env file")
+            logger.info("Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in .env")
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"Error checking AWS credentials: {e}")
+        return False
+
+def test_dynamodb_connection():
+    """Test DynamoDB connection"""
+    try:
+        logger.info("Testing DynamoDB connection...")
+        from database.dynamodb_connection import verify_existing_tables
+        verify_existing_tables()
+        logger.info("✅ DynamoDB connection successful")
+        return True
+    except Exception as e:
+        logger.error(f"❌ DynamoDB connection failed: {e}")
+        logger.info("Please check your AWS credentials and region settings")
+        return False
+
+def run_engine():
+    """Run the AI engine locally"""
+    try:
+        logger.info("🚀 Starting EdYou AI Engine (Local Mode)")
         
         # Setup environment
         if not setup_environment():
             return False
         
-        # Check DynamoDB Local
-        if not check_dynamodb_local():
-            start_dynamodb_local()
+        # Check AWS credentials
+        if not check_aws_credentials():
             return False
         
-        # Initialize DynamoDB tables
-        logger.info("Setting up DynamoDB tables...")
-        from scripts.setup_dynamodb_local import setup_dynamodb
-        setup_dynamodb()
+        # Test DynamoDB connection
+        if not test_dynamodb_connection():
+            return False
         
-        # Start the FastAPI server
-        logger.info("Starting FastAPI server on http://localhost:8080")
+        from config.settings import settings
+        logger.info(f"Starting FastAPI server on http://{settings.HOST}:{settings.PORT}")
         subprocess.run([
             sys.executable, "-m", "uvicorn", 
             "api.main:app", 
-            "--host", "0.0.0.0", 
-            "--port", "8080", 
-            "--reload"
+            "--host", settings.HOST, 
+            "--port", str(settings.PORT), 
+            "--reload" if settings.DEBUG else "--no-reload"
         ])
         
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        logger.info("👋 Shutting down...")
     except Exception as e:
-        logger.error(f"Error running engine: {e}")
+        logger.error(f"❌ Error running engine: {e}")
         return False
     
     return True

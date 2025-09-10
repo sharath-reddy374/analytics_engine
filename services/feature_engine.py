@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
-from database.models import Event, UserDailyFeatures, AppUser, ConvoSummary, EmailSend
-from datetime import datetime, date, timedelta
+from database.models import Event, UserDailyFeatures, AppUser, ConvoSummary, EmailSend, Unsubscribe
+from datetime import datetime, date, timedelta, timezone
 from typing import Dict, Any, List
 import logging
 
@@ -11,6 +11,130 @@ class FeatureEngine:
     """
     Service for computing user features and analytics
     """
+    
+    def __init__(self):
+        from services.llm_service import LLMService
+        self.llm_service = LLMService()
+    
+    def compute_user_features(self, email: str, events: List[Dict]) -> Dict[str, Any]:
+        """
+        Compute features for a specific user from normalized events
+        This is the public interface called by the processing pipeline
+        """
+        if not events:
+            return self._get_default_features()
+        
+        # Convert events to feature calculations
+        features = {}
+        
+        # Calculate recency (days since last activity)
+        latest_event = max(events, key=lambda x: x['ts'])
+        latest_ts = datetime.fromisoformat(latest_event['ts'].replace('Z', '+00:00'))
+        recency_days = (datetime.now(timezone.utc) - latest_ts).days
+        features['recency_days'] = recency_days
+        
+        # Calculate frequency (activity count in last 7 days)
+        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        recent_events = [e for e in events if datetime.fromisoformat(e['ts'].replace('Z', '+00:00')) >= week_ago]
+        features['frequency_7d'] = len(recent_events)
+        
+        test_events = [e for e in events if e['name'] == 'test_attempt']
+        features.update(self._analyze_itp_performance(test_events, week_ago))
+        
+        icp_events = [e for e in events if e['name'] == 'icp_progress']
+        features.update(self._analyze_icp_completion(icp_events))
+        
+        login_events = [e for e in events if e['name'] == 'login_session']
+        features['minutes_7d'] = self._calculate_login_minutes_from_events(login_events, week_ago)
+        
+        convo_events = [e for e in events if e['name'] == 'convo_msg']
+        features.update(self._analyze_conversations_with_ai(convo_events, week_ago))
+        
+        # Calculate subject affinity
+        features['subject_affinity'] = self._calculate_subject_affinity_from_events(events)
+        
+        # Calculate churn risk
+        features['churn_risk'] = self._assess_churn_risk(
+            features['recency_days'], 
+            features['frequency_7d'], 
+            features.get('convo_sentiment_7d_avg', 0.0)
+        )
+        
+        # Set default values for other features
+        features.update({
+            'last_email_ts': None,
+            'emails_sent_7d': 0,
+            'unsubscribed': False
+        })
+        
+        return features
+    
+    def _get_default_features(self) -> Dict[str, Any]:
+        """Return default features when no events are available"""
+        return {
+            'recency_days': 999,
+            'frequency_7d': 0,
+            'minutes_7d': 0,
+            'tests_7d': 0,
+            'test_accuracy': 0.0,
+            'avg_itp_score': 0.0,
+            'itp_improvement_trend': 0.0,
+            'weak_subjects': [],
+            'strong_subjects': [],
+            'active_courses': 0,
+            'completed_courses': 0,
+            'stalled_courses': [],
+            'recent_progress': False,
+            'subject_affinity': {},
+            'convo_sentiment_7d_avg': 0.0,
+            'churn_risk': 'high',
+            'last_email_ts': None,
+            'emails_sent_7d': 0,
+            'unsubscribed': False
+        }
+    
+    def _calculate_presentation_minutes_from_events(self, events: List[Dict], since_date: datetime) -> int:
+        """Calculate presentation minutes from normalized events"""
+        recent_events = [e for e in events if datetime.fromisoformat(e['ts'].replace('Z', '+00:00')) >= since_date]
+        
+        # Group by presentation and session
+        sessions = {}
+        for event in recent_events:
+            presentation_id = event['props'].get('presentation_id', 'unknown')
+            trigger = event['props'].get('trigger')
+            
+            if presentation_id not in sessions:
+                sessions[presentation_id] = {'start': None, 'end': None}
+            
+            if trigger == 'start':
+                sessions[presentation_id]['start'] = datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
+            elif trigger == 'end':
+                sessions[presentation_id]['end'] = datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
+        
+        # Calculate total minutes
+        total_minutes = 0
+        for session in sessions.values():
+            if session['start'] and session['end']:
+                duration = (session['end'] - session['start']).total_seconds() / 60
+                total_minutes += max(0, min(duration, 120))  # Cap at 2 hours
+        
+        return int(total_minutes)
+    
+    def _calculate_subject_affinity_from_events(self, events: List[Dict]) -> Dict[str, float]:
+        """Calculate subject affinity from events"""
+        subject_counts = {}
+        total_events = 0
+        
+        for event in events:
+            subject = event['props'].get('subject')
+            if subject:
+                subject_counts[subject] = subject_counts.get(subject, 0) + 1
+                total_events += 1
+        
+        if total_events == 0:
+            return {}
+        
+        return {subject: count / total_events for subject, count in subject_counts.items()}
     
     def compute_daily_features(self, db: Session, target_date: date = None) -> int:
         """
@@ -59,15 +183,15 @@ class FeatureEngine:
             Event.name.in_(['login', 'convo_msg', 'test_attempt', 'presentation_progress'])
         ).scalar() or 0
         
-        # Minutes spent in last 7 days (from presentation events)
-        presentation_events = db.query(Event).filter(
+        # Minutes spent in last 7 days (from login session durations)
+        login_events = db.query(Event).filter(
             Event.user_id == user_id,
             Event.ts >= week_ago,
             Event.ts <= today,
-            Event.name == 'presentation_progress'
+            Event.name == 'login_session'
         ).all()
         
-        minutes_7d = self._calculate_presentation_minutes(presentation_events)
+        minutes_7d = self._calculate_login_minutes(login_events)
         
         # Test attempts in last 7 days
         tests_7d = db.query(func.count(Event.event_id)).filter(
@@ -89,14 +213,29 @@ class FeatureEngine:
         # Conversation sentiment (7-day average)
         convo_sentiment_7d_avg = self._calculate_sentiment_avg(user_id, week_ago, today, db)
         
-        # Churn risk assessment
-        churn_risk = self._assess_churn_risk(recency_days, frequency_7d, convo_sentiment_7d_avg)
-        
         # Email fatigue metrics
         last_email_ts, emails_sent_7d = self._get_email_metrics(user_id, week_ago, today, db)
         
         # Check unsubscribe status
         unsubscribed = self._check_unsubscribe_status(user_id, db)
+        
+        icp_events = db.query(Event).filter(
+            Event.user_id == user_id,
+            Event.ts >= week_ago,
+            Event.ts <= today,
+            Event.name == 'icp_progress'
+        ).all()
+        
+        icp_features = self._analyze_icp_completion(icp_events)
+        
+        convo_events = db.query(Event).filter(
+            Event.user_id == user_id,
+            Event.ts >= week_ago,
+            Event.ts <= today,
+            Event.name == 'convo_msg'
+        ).all()
+        
+        convo_features = self._analyze_conversations_with_ai(convo_events, week_ago)
         
         return {
             'recency_days': recency_days,
@@ -107,39 +246,43 @@ class FeatureEngine:
             'top_topics': top_topics,
             'subject_affinity': subject_affinity,
             'convo_sentiment_7d_avg': convo_sentiment_7d_avg,
-            'churn_risk': churn_risk,
+            'churn_risk': self._assess_churn_risk(recency_days, frequency_7d, convo_sentiment_7d_avg),
             'last_email_ts': last_email_ts,
             'emails_sent_7d': emails_sent_7d,
-            'unsubscribed': unsubscribed
+            'unsubscribed': unsubscribed,
+            **icp_features,
+            **convo_features
         }
     
-    def _calculate_presentation_minutes(self, events: List[Event]) -> int:
-        """Calculate total minutes from presentation events"""
+    def _calculate_login_minutes(self, events: List[Dict]) -> int:
+        """Calculate total minutes from login session durations"""
         total_minutes = 0
         
-        # Group events by presentation and calculate time spent
-        presentation_sessions = {}
+        # Group events by session and calculate time spent
+        login_sessions = {}
         
         for event in events:
-            presentation_id = event.props.get('presentation_id')
-            trigger = event.props.get('trigger')
-            
-            if not presentation_id:
+            session_id = event.props.get('session_id')
+            if not session_id:
                 continue
             
-            if presentation_id not in presentation_sessions:
-                presentation_sessions[presentation_id] = {'start': None, 'end': None}
+            if session_id not in login_sessions:
+                login_sessions[session_id] = {'start': None, 'end': None}
             
-            if trigger == 'start':
-                presentation_sessions[presentation_id]['start'] = event.ts
-            elif trigger == 'end':
-                presentation_sessions[presentation_id]['end'] = event.ts
+            login_time = event.props.get('login_time')
+            logout_time = event.props.get('logout_time')
+            session_duration = event.props.get('session_duration_minutes')
+            
+            if login_time:
+                login_sessions[session_id]['start'] = datetime.fromisoformat(login_time.replace('Z', '+00:00'))
+            if logout_time:
+                login_sessions[session_id]['end'] = datetime.fromisoformat(logout_time.replace('Z', '+00:00'))
         
         # Calculate duration for each session
-        for session in presentation_sessions.values():
+        for session in login_sessions.values():
             if session['start'] and session['end']:
                 duration = (session['end'] - session['start']).total_seconds() / 60
-                total_minutes += max(0, min(duration, 120))  # Cap at 2 hours per session
+                total_minutes += max(0, min(duration, 180))  # Cap at 3 hours per session
         
         return int(total_minutes)
     
@@ -280,8 +423,6 @@ class FeatureEngine:
     
     def _check_unsubscribe_status(self, user_id: str, db: Session) -> bool:
         """Check if user has unsubscribed"""
-        from database.models import Unsubscribe
-        
         unsubscribe = db.query(Unsubscribe).filter(Unsubscribe.user_id == user_id).first()
         return unsubscribe is not None
     
@@ -303,3 +444,394 @@ class FeatureEngine:
                 **features
             )
             db.add(new_features)
+    
+    def _analyze_itp_performance(self, test_events: List[Dict], week_ago: datetime) -> Dict[str, Any]:
+        """
+        Analyze ITP (Infinite Test Series) performance with detailed scoring from real data structure
+        """
+        if not test_events:
+            return {
+                'test_accuracy': 0.0,
+                'tests_7d': 0,
+                'avg_itp_score': 0.0,
+                'itp_improvement_trend': 0.0,
+                'weak_subjects': [],
+                'strong_subjects': []
+            }
+        
+        all_responses = []
+        subject_performance = {}
+        recent_tests = 0
+        
+        for event in test_events:
+            props = event['props']
+            
+            # Extract Response data (array of test attempts)
+            responses = props.get('Response', {})
+            if isinstance(responses, dict):
+                for timestamp, response_list in responses.items():
+                    if isinstance(response_list, list):
+                        for response in response_list:
+                            if isinstance(response, dict):
+                                correct_response = response.get('Correct_Response')
+                                user_response = response.get('Response')
+                                subject = props.get('Subject', 'Unknown')
+                                
+                                # Calculate if answer was correct
+                                is_correct = (correct_response == user_response) if correct_response is not None else False
+                                
+                                all_responses.append({
+                                    'is_correct': is_correct,
+                                    'subject': subject,
+                                    'timestamp': timestamp,
+                                    'question': response.get('Question', ''),
+                                    'correct_response': correct_response,
+                                    'user_response': user_response
+                                })
+                                
+                                # Track subject performance
+                                if subject not in subject_performance:
+                                    subject_performance[subject] = []
+                                subject_performance[subject].append(1 if is_correct else 0)
+                                
+                                # Count recent tests (last 7 days)
+                                try:
+                                    response_date = datetime.strptime(timestamp, '%Y-%m-%d,%H:%M:%S')
+                                    if response_date >= week_ago.replace(tzinfo=None):
+                                        recent_tests += 1
+                                except:
+                                    pass
+        
+        if not all_responses:
+            return {
+                'test_accuracy': 0.0,
+                'tests_7d': 0,
+                'avg_itp_score': 0.0,
+                'itp_improvement_trend': 0.0,
+                'weak_subjects': [],
+                'strong_subjects': []
+            }
+        
+        # Calculate accuracy
+        correct_count = sum(1 for r in all_responses if r['is_correct'])
+        accuracy = correct_count / len(all_responses)
+        
+        # Calculate average score (percentage correct)
+        avg_score = accuracy * 100
+        
+        # Calculate improvement trend (recent vs older performance)
+        if len(all_responses) >= 10:
+            recent_half = all_responses[-len(all_responses)//2:]
+            older_half = all_responses[:len(all_responses)//2]
+            
+            recent_accuracy = sum(1 for r in recent_half if r['is_correct']) / len(recent_half)
+            older_accuracy = sum(1 for r in older_half if r['is_correct']) / len(older_half)
+            improvement_trend = (recent_accuracy - older_accuracy) * 100
+        else:
+            improvement_trend = 0.0
+        
+        # Identify weak and strong subjects
+        weak_subjects = []
+        strong_subjects = []
+        
+        for subject, performances in subject_performance.items():
+            if len(performances) >= 3:  # Only consider subjects with enough data
+                avg_performance = sum(performances) / len(performances)
+                if avg_performance < 0.6:
+                    weak_subjects.append(subject)
+                elif avg_performance > 0.8:
+                    strong_subjects.append(subject)
+        
+        return {
+            'test_accuracy': accuracy,
+            'tests_7d': recent_tests,
+            'avg_itp_score': avg_score,
+            'itp_improvement_trend': improvement_trend,
+            'weak_subjects': weak_subjects,
+            'strong_subjects': strong_subjects
+        }
+    
+    def _analyze_icp_completion(self, icp_events: List[Dict]) -> Dict[str, Any]:
+        """
+        Analyze ICP (Individualized Course Plans) completion progress from real data structure
+        Updated to handle completedSection/25 logic and start_module completion detection
+        """
+        if not icp_events:
+            return {
+                'icp_completion_rate': 0.0,
+                'active_courses': 0,
+                'completed_courses': 0,
+                'stalled_courses': [],
+                'recent_progress': False
+            }
+        
+        course_progress = {}
+        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        
+        for event in icp_events:
+            props = event['props']
+            course_id = props.get('id', props.get('course_id', 'unknown'))
+            
+            # Extract status information from real data structure
+            status = props.get('status', {})
+            if isinstance(status, dict):
+                completed_sections = float(status.get('completedSection', 0))
+                current_section = status.get('currentSection', 0)
+                start_module = status.get('start_module', True)
+                progress = status.get('progress', 0)
+                
+                # Parse currentSection format (e.g., 102 = lesson 1, section 2)
+                if current_section and current_section >= 100:
+                    current_lesson = current_section // 100
+                    current_section_in_lesson = current_section % 100
+                else:
+                    current_lesson = 1
+                    current_section_in_lesson = current_section
+                
+                event_time = datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
+                
+                if course_id not in course_progress:
+                    course_progress[course_id] = {
+                        'completed_sections': 0,
+                        'current_section': current_section,
+                        'current_lesson': current_lesson,
+                        'start_module': start_module,
+                        'progress': progress,
+                        'last_activity': event_time,
+                        'recent_activity': False,
+                        'title': props.get('title', 'Unknown Course')
+                    }
+                
+                # Update with latest progress
+                if completed_sections >= course_progress[course_id]['completed_sections']:
+                    course_progress[course_id]['completed_sections'] = completed_sections
+                    course_progress[course_id]['current_section'] = current_section
+                    course_progress[course_id]['current_lesson'] = current_lesson
+                    course_progress[course_id]['start_module'] = start_module
+                    course_progress[course_id]['progress'] = progress
+                    course_progress[course_id]['last_activity'] = event_time
+                
+                # Check for recent activity
+                if event_time >= week_ago:
+                    course_progress[course_id]['recent_activity'] = True
+        
+        if not course_progress:
+            return {
+                'icp_completion_rate': 0.0,
+                'active_courses': 0,
+                'completed_courses': 0,
+                'stalled_courses': [],
+                'recent_progress': False
+            }
+        
+        # Calculate metrics using updated completion logic
+        total_completion = 0
+        active_courses = 0
+        completed_courses = 0
+        stalled_courses = []
+        recent_progress = False
+        
+        for course_id, progress_data in course_progress.items():
+            completion_rate = progress_data['completed_sections'] / 25.0
+            total_completion += completion_rate
+            
+            is_completed = (
+                # Case 1: Completed all 25 sections but haven't moved to summary yet
+                (progress_data['completed_sections'] >= 25 and not progress_data['start_module']) or
+                # Case 2: Completed and moved to summary (reset to 0 with start_module True)
+                (progress_data['completed_sections'] == 0 and progress_data['start_module'])
+            )
+            
+            if is_completed:
+                completed_courses += 1
+                logger.info(f"📚 Course {course_id} marked as COMPLETED: sections={progress_data['completed_sections']}, start_module={progress_data['start_module']}")
+            elif progress_data['recent_activity']:
+                active_courses += 1
+                recent_progress = True
+            elif completion_rate > 0 and (datetime.now(timezone.utc) - progress_data['last_activity']).days > 14:
+                stalled_courses.append(progress_data['title'])
+        
+        avg_completion_rate = total_completion / len(course_progress) if course_progress else 0.0
+        
+        return {
+            'icp_completion_rate': min(avg_completion_rate, 1.0),  # Cap at 100%
+            'active_courses': active_courses,
+            'completed_courses': completed_courses,
+            'stalled_courses': stalled_courses,
+            'recent_progress': recent_progress
+        }
+    
+    def _calculate_login_minutes_from_events(self, login_events: List[Dict], since_date: datetime) -> int:
+        """
+        Calculate learning minutes from login session durations in InvestorLoginHistory_Prod
+        """
+        recent_events = [e for e in login_events if datetime.fromisoformat(e['ts'].replace('Z', '+00:00')) >= since_date]
+        
+        total_minutes = 0
+        for event in recent_events:
+            props = event['props']
+            
+            login_time = props.get('login_time')
+            logout_time = props.get('logout_time')
+            session_duration = props.get('session_duration_minutes')
+            
+            # Try to get session info from the event timestamp and device info
+            session_start = props.get('Session', {})
+            if isinstance(session_start, dict):
+                start_time = session_start.get('start_time')
+                end_time = session_start.get('end_time')
+                if start_time and end_time:
+                    try:
+                        start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                        end_dt = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+                        duration_minutes = (end_dt - start_dt).total_seconds() / 60
+                        total_minutes += max(0, min(duration_minutes, 180))  # Cap at 3 hours
+                        continue
+                    except:
+                        pass
+            
+            if session_duration:
+                # If duration is already calculated, use it
+                total_minutes += min(float(session_duration), 180)  # Cap at 3 hours per session
+            elif login_time and logout_time:
+                # Calculate duration from timestamps
+                try:
+                    login_dt = datetime.fromisoformat(login_time.replace('Z', '+00:00'))
+                    logout_dt = datetime.fromisoformat(logout_time.replace('Z', '+00:00'))
+                    duration_minutes = (logout_dt - login_dt).total_seconds() / 60
+                    total_minutes += max(0, min(duration_minutes, 180))  # Cap at 3 hours
+                except:
+                    pass
+            else:
+                conversation_count = len(props.get('data', []))  # Count conversation messages
+                device_info = props.get('device_info', {})
+                
+                if conversation_count > 0:
+                    # Estimate ~1.5 minutes per conversation message (more realistic)
+                    estimated_minutes = min(conversation_count * 1.5, 90)
+                    total_minutes += estimated_minutes
+                elif device_info:
+                    # If we have device info but no conversation, estimate minimal session time
+                    total_minutes += 5  # 5 minute minimum session
+        
+        return int(total_minutes)
+    
+    def _analyze_conversations_with_ai(self, convo_events: List[Dict], week_ago: datetime) -> Dict[str, Any]:
+        """
+        Analyze conversations using OpenAI to extract topics, sentiment, and email triggers
+        """
+        if not convo_events:
+            return {
+                'conversations_7d': 0,
+                'top_topics': [],
+                'convo_sentiment_7d_avg': 0.0,
+                'ai_email_triggers': [],
+                'conversation_insights': {}
+            }
+        
+        # Filter user messages from recent conversations
+        user_messages = [e for e in convo_events if e['props'].get('role') == 'user']
+        recent_messages = [e for e in user_messages if datetime.fromisoformat(e['ts'].replace('Z', '+00:00')) >= week_ago]
+        
+        if not recent_messages:
+            return {
+                'conversations_7d': 0,
+                'top_topics': [],
+                'convo_sentiment_7d_avg': 0.0,
+                'ai_email_triggers': [],
+                'conversation_insights': {}
+            }
+        
+        # Prepare conversation data for AI analysis
+        conversations_for_analysis = []
+        for msg in recent_messages[-20:]:  # Analyze last 20 messages to avoid token limits
+            content = msg['props'].get('content', msg['props'].get('message', ''))
+            timestamp = msg['ts']
+            conversations_for_analysis.append({
+                'content': content,
+                'timestamp': timestamp,
+                'role': 'user'
+            })
+        
+        try:
+            import asyncio
+            
+            # Create event loop if none exists
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # Run the async analysis
+            analysis = loop.run_until_complete(
+                self.llm_service.analyze_conversations_for_triggers(conversations_for_analysis)
+            )
+            
+            return {
+                'conversations_7d': len(recent_messages),
+                'top_topics': analysis.get('topics', []),
+                'convo_sentiment_7d_avg': analysis.get('sentiment_avg', 0.0),
+                'ai_email_triggers': analysis.get('triggers', []),
+                'conversation_insights': analysis.get('insights', {})
+            }
+        except Exception as e:
+            logger.error(f"Failed to analyze conversations with AI: {str(e)}")
+            
+            fallback_topics = []
+            conversation_text = " ".join([msg['props'].get('content', '') for msg in recent_messages])
+            text_lower = conversation_text.lower()
+            
+            # Enhanced topic detection patterns matching actual conversation content
+            topic_patterns = {
+                'Biology>Cells': ['cell', 'cellular', 'mitochondria', 'nucleus', 'membrane', 'organelle'],
+                'Biology>Photosynthesis': ['photosynthesis', 'chloroplast', 'light reaction', 'calvin cycle'],
+                'Biology>Cellular Mechanisms': ['cellular', 'cell', 'mechanism', 'biology', 'molecular'],
+                'Pharmacology>Antibiotics': ['antibiotic', 'antimicrobial', 'penicillin', 'vancomycin', 'resistance', 'bacteria'],
+                'Pharmacology>General': ['drug', 'medication', 'pharmacology', 'dosage', 'side effect', 'pharmacokinetics'],
+                'USMLE>Cardiology': ['heart', 'cardiac', 'ecg', 'blood pressure', 'arrhythmia', 'myocardial'],
+                'USMLE>Pharmacology': ['usmle', 'step', 'board', 'exam', 'pharmacology', 'drug interaction'],
+                'USMLE>Pathology': ['pathology', 'disease', 'diagnosis', 'symptom', 'treatment', 'pathophysiology'],
+                'Immunology>Hypersensitivity Reactions': ['hypersensitivity', 'allergy', 'immune', 'reaction', 'ige', 'anaphylaxis'],
+                'Medicine>General': ['medicine', 'medical', 'patient', 'clinical', 'therapy', 'treatment'],
+                'History>Stone Age': ['stone age', 'neolithic', 'paleolithic', 'prehistoric', 'ancient'],
+                'History>General': ['history', 'historical', 'ancient', 'civilization', 'culture'],
+                'Exam>Preparation': ['exam', 'test', 'quiz', 'preparation', 'study', 'review', 'tomorrow']
+            }
+            
+            for topic, keywords in topic_patterns.items():
+                if any(keyword in text_lower for keyword in keywords):
+                    fallback_topics.append(topic)
+            
+            # Generate enhanced fallback triggers based on detected patterns
+            fallback_triggers = []
+            if any(word in text_lower for word in ['exam', 'test']) and any(word in text_lower for word in ['tomorrow', 'next week', 'upcoming']):
+                subject = fallback_topics[0].split('>')[0] if fallback_topics else 'General'
+                fallback_triggers.append({
+                    'trigger': 'exam_followup',
+                    'subject': subject,
+                    'days_before': 1,
+                    'message_type': 'exam_followup_reminder'
+                })
+            
+            if any(word in text_lower for word in ['difficult', 'hard', 'struggling', 'confused', 'help']):
+                subject = fallback_topics[0] if fallback_topics else 'General'
+                fallback_triggers.append({
+                    'trigger': 'learning_support',
+                    'subject': subject,
+                    'days_before': 0,
+                    'message_type': 'learning_support_offer'
+                })
+            
+            return {
+                'conversations_7d': len(recent_messages),
+                'top_topics': fallback_topics,
+                'convo_sentiment_7d_avg': 0.7,  # Assume positive sentiment for engaged learners
+                'ai_email_triggers': fallback_triggers,
+                'conversation_insights': {
+                    'engagement_level': 'high' if len(recent_messages) > 20 else 'medium',
+                    'learning_gaps': [topic.split('>')[1] for topic in fallback_topics if '>' in topic],
+                    'upcoming_events': [],
+                    'needs': ['Additional practice', 'Concept clarification']
+                }
+            }

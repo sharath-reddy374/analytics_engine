@@ -34,39 +34,152 @@ class DecisionEngine:
         """Default email rules if file is not available"""
         return [
             {
-                'id': 'help_cells_bio',
+                'id': 'help_biology_general',
                 'when': {
                     'all': [
-                        {'contains': {'field': 'top_topics', 'value': 'Biology>Cells'}},
+                        {'contains_pattern': {'field': 'top_topics', 'pattern': 'Biology>*'}},
                         {'lt': {'field': 'emails_sent_7d', 'value': 2}},
-                        {'eq': {'field': 'unsubscribed', 'value': False}}
+                        {'eq': {'field': 'unsubscribed', 'value': False}},
+                        {'gte': {'field': 'frequency_7d', 'value': 2}}
                     ]
                 },
                 'action': {
-                    'template_id': 'bio_cells_help_v1',
+                    'template_id': 'biology_help_v1',
                     'priority': 90,
                     'cooldown_days': 3
                 }
             },
             {
-                'id': 'algebra_followup',
+                'id': 'help_pharmacology_general',
                 'when': {
                     'all': [
-                        {'contains': {'field': 'top_topics', 'value': 'Algebra'}},
-                        {'gte': {'field': 'recency_days', 'value': 1}}
+                        {'contains_pattern': {'field': 'top_topics', 'pattern': 'Pharmacology>*'}},
+                        {'lt': {'field': 'emails_sent_7d', 'value': 2}},
+                        {'eq': {'field': 'unsubscribed', 'value': False}},
+                        {'gte': {'field': 'frequency_7d', 'value': 2}}
                     ]
                 },
                 'action': {
-                    'template_id': 'algebra_next_steps_v1',
-                    'priority': 80,
+                    'template_id': 'pharmacology_help_v1',
+                    'priority': 92,
                     'cooldown_days': 3
+                }
+            },
+            {
+                'id': 'help_immunology_general',
+                'when': {
+                    'all': [
+                        {'contains_pattern': {'field': 'top_topics', 'pattern': 'Immunology>*'}},
+                        {'lt': {'field': 'emails_sent_7d', 'value': 2}},
+                        {'eq': {'field': 'unsubscribed', 'value': False}},
+                        {'gte': {'field': 'frequency_7d', 'value': 2}}
+                    ]
+                },
+                'action': {
+                    'template_id': 'immunology_help_v1',
+                    'priority': 88,
+                    'cooldown_days': 3
+                }
+            },
+            {
+                'id': 'help_history_general',
+                'when': {
+                    'all': [
+                        {'contains_pattern': {'field': 'top_topics', 'pattern': 'History>*'}},
+                        {'lt': {'field': 'emails_sent_7d', 'value': 2}},
+                        {'eq': {'field': 'unsubscribed', 'value': False}},
+                        {'gte': {'field': 'frequency_7d', 'value': 2}}
+                    ]
+                },
+                'action': {
+                    'template_id': 'history_help_v1',
+                    'priority': 85,
+                    'cooldown_days': 3
+                }
+            },
+            {
+                'id': 'exam_followup_trigger',
+                'when': {
+                    'all': [
+                        {'contains_trigger': {'field': 'ai_email_triggers', 'trigger_type': 'exam_followup'}},
+                        {'lt': {'field': 'emails_sent_7d', 'value': 2}},
+                        {'eq': {'field': 'unsubscribed', 'value': False}}
+                    ]
+                },
+                'action': {
+                    'template_id': 'exam_followup_v1',
+                    'priority': 95,
+                    'cooldown_days': 2
+                }
+            },
+            {
+                'id': 'learning_support_trigger',
+                'when': {
+                    'all': [
+                        {'contains_trigger': {'field': 'ai_email_triggers', 'trigger_type': 'learning_support'}},
+                        {'lt': {'field': 'emails_sent_7d', 'value': 2}},
+                        {'eq': {'field': 'unsubscribed', 'value': False}}
+                    ]
+                },
+                'action': {
+                    'template_id': 'learning_support_v1',
+                    'priority': 93,
+                    'cooldown_days': 3
+                }
+            },
+            {
+                'id': 'high_engagement_reward',
+                'when': {
+                    'all': [
+                        {'gte': {'field': 'frequency_7d', 'value': 100}},
+                        {'gte': {'field': 'conversations_7d', 'value': 50}},
+                        {'gt': {'field': 'convo_sentiment_7d_avg', 'value': 0.5}},
+                        {'eq': {'field': 'unsubscribed', 'value': False}}
+                    ]
+                },
+                'action': {
+                    'template_id': 'engagement_reward_v1',
+                    'priority': 96,
+                    'cooldown_days': 14
+                }
+            },
+            {
+                'id': 'test_performance_help',
+                'when': {
+                    'all': [
+                        {'gte': {'field': 'tests_7d', 'value': 100}},
+                        {'lt': {'field': 'test_accuracy', 'value': 0.5}},
+                        {'eq': {'field': 'unsubscribed', 'value': False}}
+                    ]
+                },
+                'action': {
+                    'template_id': 'test_improvement_v1',
+                    'priority': 87,
+                    'cooldown_days': 5
+                }
+            },
+            {
+                'id': 'course_completion_celebration',
+                'when': {
+                    'all': [
+                        {'gte': {'field': 'completed_courses', 'value': 1}},
+                        {'eq': {'field': 'unsubscribed', 'value': False}},
+                        {'lt': {'field': 'emails_sent_7d', 'value': 1}}
+                    ]
+                },
+                'action': {
+                    'template_id': 'course_completion_v1',
+                    'priority': 94,
+                    'cooldown_days': 7
                 }
             },
             {
                 'id': 'winback_idle',
                 'when': {
                     'all': [
-                        {'gte': {'field': 'recency_days', 'value': 7}}
+                        {'gte': {'field': 'recency_days', 'value': 7}},
+                        {'lte': {'field': 'recency_days', 'value': 30}},
+                        {'eq': {'field': 'unsubscribed', 'value': False}}
                     ]
                 },
                 'action': {
@@ -115,6 +228,42 @@ class DecisionEngine:
         
         return self._apply_daily_limits(email_candidates, db)
     
+    def evaluate_user(self, email: str, features: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Evaluate a single user and return email decisions
+        Args:
+            email: User email address
+            features: Dictionary of computed user features
+        Returns:
+            List of email decisions for the user
+        """
+        # Check basic eligibility
+        if not self._is_user_eligible_basic(features):
+            logger.info(f"User {email} not eligible for emails")
+            return []
+        
+        # Evaluate rules for this user
+        matching_rules = self._evaluate_rules_for_features(features)
+        
+        if not matching_rules:
+            logger.info(f"No matching rules for user {email}")
+            return []
+        
+        # Select highest priority rule
+        best_rule = max(matching_rules, key=lambda r: r['action']['priority'])
+        
+        decision = {
+            'user_email': email,
+            'rule_id': best_rule['id'],
+            'template_id': best_rule['action']['template_id'],
+            'priority': best_rule['action']['priority'],
+            'features': features,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        logger.info(f"Selected rule '{best_rule['id']}' for user {email} (priority: {best_rule['action']['priority']})")
+        return [decision]
+    
     def _is_email_eligible(self, user_features: UserDailyFeatures, db: Session) -> bool:
         """Check if user is eligible for emails"""
         
@@ -152,6 +301,22 @@ class DecisionEngine:
         
         return True
     
+    def _is_user_eligible_basic(self, features: Dict[str, Any]) -> bool:
+        """Check basic eligibility without database access"""
+        
+        # Check unsubscribe status
+        if features.get('unsubscribed', False):
+            logger.debug("User unsubscribed")
+            return False
+        
+        # Check weekly email limit
+        emails_sent_7d = features.get('emails_sent_7d', 0)
+        if emails_sent_7d >= 5:  # Max 5 emails per week
+            logger.debug(f"User hit weekly email limit: {emails_sent_7d}")
+            return False
+        
+        return True
+    
     def _is_within_send_hours(self, user: AppUser) -> bool:
         """Check if current time is within user's send hours"""
         from config.settings import settings
@@ -177,6 +342,17 @@ class DecisionEngine:
         
         return matching_rules
     
+    def _evaluate_rules_for_features(self, features: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Evaluate all rules for user features dictionary"""
+        matching_rules = []
+        
+        for rule in self.rules:
+            if self._evaluate_rule_conditions_dict(rule['when'], features):
+                matching_rules.append(rule)
+                logger.debug(f"Rule '{rule['id']}' matched")
+        
+        return matching_rules
+    
     def _evaluate_rule_conditions(self, conditions: Dict[str, Any], user_features: UserDailyFeatures) -> bool:
         """Evaluate rule conditions against user features"""
         
@@ -186,6 +362,16 @@ class DecisionEngine:
             return any(self._evaluate_condition(cond, user_features) for cond in conditions['any'])
         else:
             return self._evaluate_condition(conditions, user_features)
+    
+    def _evaluate_rule_conditions_dict(self, conditions: Dict[str, Any], features: Dict[str, Any]) -> bool:
+        """Evaluate rule conditions against features dictionary"""
+        
+        if 'all' in conditions:
+            return all(self._evaluate_condition_dict(cond, features) for cond in conditions['all'])
+        elif 'any' in conditions:
+            return any(self._evaluate_condition_dict(cond, features) for cond in conditions['any'])
+        else:
+            return self._evaluate_condition_dict(conditions, features)
     
     def _evaluate_condition(self, condition: Dict[str, Any], user_features: UserDailyFeatures) -> bool:
         """Evaluate a single condition"""
@@ -221,6 +407,77 @@ class DecisionEngine:
                 elif isinstance(field_value, str):
                     return value not in field_value
                 return True
+            elif operator == 'contains_pattern':
+                if isinstance(field_value, list):
+                    if value.endswith('*'):
+                        # Wildcard pattern matching (e.g., 'Biology>*' matches any Biology subtopic)
+                        prefix = value[:-1]
+                        return any(item.startswith(prefix) for item in field_value)
+                    else:
+                        return value in field_value
+                return False
+            elif operator == 'contains_trigger':
+                if isinstance(field_value, list):
+                    return any(
+                        isinstance(trigger, dict) and trigger.get('trigger') == value
+                        for trigger in field_value
+                    )
+                return False
+        
+        return False
+    
+    def _evaluate_condition_dict(self, condition: Dict[str, Any], features: Dict[str, Any]) -> bool:
+        """Evaluate a single condition against features dictionary"""
+        
+        for operator, params in condition.items():
+            field = params['field']
+            value = params.get('value')
+            pattern = params.get('pattern')
+            trigger_type = params.get('trigger_type')
+            
+            # Get field value from features
+            field_value = features.get(field)
+            
+            if operator == 'eq':
+                return field_value == value
+            elif operator == 'ne':
+                return field_value != value
+            elif operator == 'gt':
+                return field_value is not None and field_value > value
+            elif operator == 'gte':
+                return field_value is not None and field_value >= value
+            elif operator == 'lt':
+                return field_value is not None and field_value < value
+            elif operator == 'lte':
+                return field_value is not None and field_value <= value
+            elif operator == 'contains':
+                if isinstance(field_value, list):
+                    return value in field_value
+                elif isinstance(field_value, str):
+                    return value in field_value
+                return False
+            elif operator == 'not_contains':
+                if isinstance(field_value, list):
+                    return value not in field_value
+                elif isinstance(field_value, str):
+                    return value not in field_value
+                return True
+            elif operator == 'contains_pattern':
+                if isinstance(field_value, list):
+                    if pattern.endswith('*'):
+                        # Wildcard pattern matching (e.g., 'Biology>*' matches any Biology subtopic)
+                        prefix = pattern[:-1]
+                        return any(item.startswith(prefix) for item in field_value)
+                    else:
+                        return pattern in field_value
+                return False
+            elif operator == 'contains_trigger':
+                if isinstance(field_value, list):
+                    return any(
+                        isinstance(trigger, dict) and trigger.get('trigger') == trigger_type
+                        for trigger in field_value
+                    )
+                return False
         
         return False
     
