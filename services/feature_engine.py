@@ -49,6 +49,29 @@ class FeatureEngine:
         
         convo_events = [e for e in events if e['name'] == 'convo_msg']
         features.update(self._analyze_conversations_with_ai(convo_events, week_ago))
+
+        # === Trigger convenience booleans for rules engine ===
+        trigs = features.get('ai_email_triggers', []) or []
+        def _is_dict(d): return isinstance(d, dict)
+
+        features['has_exam_last_minute_prep'] = any(
+            _is_dict(t) and (
+                t.get('message_type') == 'last_minute_prep' or
+                (t.get('trigger') in ('exam_prep', 'pre_exam'))
+            ) for t in trigs
+        )
+        features['has_exam_post_checkin'] = any(
+            _is_dict(t) and (
+                t.get('message_type') == 'how_did_it_go' or
+                (t.get('trigger') in ('post_exam', 'exam_followup'))
+            ) for t in trigs
+        )
+        features['has_learning_support'] = any(
+            _is_dict(t) and (
+                t.get('trigger') == 'learning_support' or
+                t.get('trigger_type') == 'learning_support'
+            ) for t in trigs
+        )
         
         # Calculate subject affinity
         features['subject_affinity'] = self._calculate_subject_affinity_from_events(events)
@@ -83,6 +106,7 @@ class FeatureEngine:
             'strong_subjects': [],
             'active_courses': 0,
             'completed_courses': 0,
+            'completed_course_titles': [],
             'stalled_courses': [],
             'recent_progress': False,
             'subject_affinity': {},
@@ -90,7 +114,10 @@ class FeatureEngine:
             'churn_risk': 'high',
             'last_email_ts': None,
             'emails_sent_7d': 0,
-            'unsubscribed': False
+            'unsubscribed': False,
+            'has_exam_last_minute_prep': False,
+            'has_exam_post_checkin': False,
+            'has_learning_support': False,
         }
     
     def _calculate_presentation_minutes_from_events(self, events: List[Dict], since_date: datetime) -> int:
@@ -236,6 +263,28 @@ class FeatureEngine:
         ).all()
         
         convo_features = self._analyze_conversations_with_ai(convo_events, week_ago)
+
+        # === Trigger convenience booleans for rules engine (DB path) ===
+        trigs = (convo_features or {}).get('ai_email_triggers', []) or []
+        def _is_dict(d): return isinstance(d, dict)
+        has_exam_last_minute_prep = any(
+            _is_dict(t) and (
+                t.get('message_type') == 'last_minute_prep' or
+                (t.get('trigger') in ('exam_prep', 'pre_exam'))
+            ) for t in trigs
+        )
+        has_exam_post_checkin = any(
+            _is_dict(t) and (
+                t.get('message_type') == 'how_did_it_go' or
+                (t.get('trigger') in ('post_exam', 'exam_followup'))
+            ) for t in trigs
+        )
+        has_learning_support = any(
+            _is_dict(t) and (
+                t.get('trigger') == 'learning_support' or
+                t.get('trigger_type') == 'learning_support'
+            ) for t in trigs
+        )
         
         return {
             'recency_days': recency_days,
@@ -251,7 +300,10 @@ class FeatureEngine:
             'emails_sent_7d': emails_sent_7d,
             'unsubscribed': unsubscribed,
             **icp_features,
-            **convo_features
+            **convo_features,
+            'has_exam_last_minute_prep': has_exam_last_minute_prep,
+            'has_exam_post_checkin': has_exam_post_checkin,
+            'has_learning_support': has_learning_support,
         }
     
     def _calculate_login_minutes(self, events: List[Dict]) -> int:
@@ -553,110 +605,119 @@ class FeatureEngine:
     
     def _analyze_icp_completion(self, icp_events: List[Dict]) -> Dict[str, Any]:
         """
-        Analyze ICP (Individualized Course Plans) completion progress from real data structure
-        Updated to handle completedSection/25 logic and start_module completion detection
+        Analyze ICP completion using section-level fields emitted by DataProcessor.process_icp_data():
+          - total_sections, completed_sections, is_completed, progress_percent, completion_rate
+          - id/title + ts
+        Works with either dict events ({'props': ..., 'ts': ...}) or ORM Event objects (.props, .ts).
         """
+        def _get(ev, key, default=None):
+            return ev.get(key, default) if isinstance(ev, dict) else getattr(ev, key, default)
+
+        def _get_props(ev) -> Dict[str, Any]:
+            p = _get(ev, 'props')
+            return p or {}
+
+        def _get_event_time(ev) -> datetime:
+            ts = _get(ev, 'ts')
+            if isinstance(ts, datetime):
+                return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+            if isinstance(ts, str):
+                try:
+                    return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                except Exception:
+                    return datetime.now(timezone.utc)
+            return datetime.now(timezone.utc)
+
         if not icp_events:
             return {
                 'icp_completion_rate': 0.0,
                 'active_courses': 0,
                 'completed_courses': 0,
+                'completed_course_titles': [],
                 'stalled_courses': [],
                 'recent_progress': False
             }
-        
-        course_progress = {}
+
         week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        
-        for event in icp_events:
-            props = event['props']
-            course_id = props.get('id', props.get('course_id', 'unknown'))
-            
-            # Extract status information from real data structure
-            status = props.get('status', {})
-            if isinstance(status, dict):
-                completed_sections = float(status.get('completedSection', 0))
-                current_section = status.get('currentSection', 0)
-                start_module = status.get('start_module', True)
-                progress = status.get('progress', 0)
-                
-                # Parse currentSection format (e.g., 102 = lesson 1, section 2)
-                if current_section and current_section >= 100:
-                    current_lesson = current_section // 100
-                    current_section_in_lesson = current_section % 100
-                else:
-                    current_lesson = 1
-                    current_section_in_lesson = current_section
-                
-                event_time = datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
-                
-                if course_id not in course_progress:
-                    course_progress[course_id] = {
-                        'completed_sections': 0,
-                        'current_section': current_section,
-                        'current_lesson': current_lesson,
-                        'start_module': start_module,
-                        'progress': progress,
-                        'last_activity': event_time,
-                        'recent_activity': False,
-                        'title': props.get('title', 'Unknown Course')
-                    }
-                
-                # Update with latest progress
-                if completed_sections >= course_progress[course_id]['completed_sections']:
-                    course_progress[course_id]['completed_sections'] = completed_sections
-                    course_progress[course_id]['current_section'] = current_section
-                    course_progress[course_id]['current_lesson'] = current_lesson
-                    course_progress[course_id]['start_module'] = start_module
-                    course_progress[course_id]['progress'] = progress
-                    course_progress[course_id]['last_activity'] = event_time
-                
-                # Check for recent activity
+        course_progress: Dict[str, Dict[str, Any]] = {}
+
+        # Use the latest event per course_id
+        for ev in icp_events:
+            props = _get_props(ev)
+            if not props:
+                continue
+
+            course_id = props.get('id') or props.get('course_id') or 'unknown'
+            event_time = _get_event_time(ev)
+
+            total_sections = int(props.get('total_sections') or 0)
+            completed_sections = int(props.get('completed_sections') or 0)
+
+            # Prefer boolean from DataProcessor; fall back to equality check
+            is_completed = props.get('is_completed')
+            if is_completed is None:
+                is_completed = (total_sections > 0 and completed_sections >= total_sections)
+
+            title = props.get('title') or props.get('course_title') or 'Unknown Course'
+
+            existing = course_progress.get(course_id)
+            if (existing is None) or (event_time > existing['last_activity']):
+                course_progress[course_id] = {
+                    'total_sections': total_sections,
+                    'completed_sections': completed_sections,
+                    'is_completed': bool(is_completed),
+                    'last_activity': event_time,
+                    'recent_activity': event_time >= week_ago,
+                    'title': title,
+                }
+            else:
                 if event_time >= week_ago:
-                    course_progress[course_id]['recent_activity'] = True
-        
+                    existing['recent_activity'] = True
+
         if not course_progress:
             return {
                 'icp_completion_rate': 0.0,
                 'active_courses': 0,
                 'completed_courses': 0,
+                'completed_course_titles': [],
                 'stalled_courses': [],
                 'recent_progress': False
             }
-        
-        # Calculate metrics using updated completion logic
-        total_completion = 0
+
+        # Aggregate across courses
+        total_completion = 0.0
         active_courses = 0
         completed_courses = 0
-        stalled_courses = []
-        recent_progress = False
-        
-        for course_id, progress_data in course_progress.items():
-            completion_rate = progress_data['completed_sections'] / 25.0
+        completed_titles: List[str] = []
+        stalled_courses: List[str] = []
+        recent_progress = any(c['recent_activity'] for c in course_progress.values())
+
+        now = datetime.now(timezone.utc)
+        for cid, c in course_progress.items():
+            total = c['total_sections'] or 0
+            comp = c['completed_sections'] or 0
+            completion_rate = (comp / total) if total else 0.0
             total_completion += completion_rate
-            
-            is_completed = (
-                # Case 1: Completed all 25 sections but haven't moved to summary yet
-                (progress_data['completed_sections'] >= 25 and not progress_data['start_module']) or
-                # Case 2: Completed and moved to summary (reset to 0 with start_module True)
-                (progress_data['completed_sections'] == 0 and progress_data['start_module'])
-            )
-            
-            if is_completed:
+
+            if c['is_completed']:
                 completed_courses += 1
-                logger.info(f"📚 Course {course_id} marked as COMPLETED: sections={progress_data['completed_sections']}, start_module={progress_data['start_module']}")
-            elif progress_data['recent_activity']:
+                completed_titles.append(c['title'])
+                logger.info(
+                    "📚 Course %s marked as COMPLETED: sections=%s/%s (%.2f%%)",
+                    cid, comp, total, completion_rate * 100.0
+                )
+            elif c['recent_activity']:
                 active_courses += 1
-                recent_progress = True
-            elif completion_rate > 0 and (datetime.now(timezone.utc) - progress_data['last_activity']).days > 14:
-                stalled_courses.append(progress_data['title'])
-        
+            elif completion_rate > 0 and (now - c['last_activity']).days > 14:
+                stalled_courses.append(c['title'])
+
         avg_completion_rate = total_completion / len(course_progress) if course_progress else 0.0
-        
+
         return {
-            'icp_completion_rate': min(avg_completion_rate, 1.0),  # Cap at 100%
+            'icp_completion_rate': min(avg_completion_rate, 1.0),
             'active_courses': active_courses,
             'completed_courses': completed_courses,
+            'completed_course_titles': completed_titles,
             'stalled_courses': stalled_courses,
             'recent_progress': recent_progress
         }
@@ -718,8 +779,23 @@ class FeatureEngine:
     
     def _analyze_conversations_with_ai(self, convo_events: List[Dict], week_ago: datetime) -> Dict[str, Any]:
         """
-        Analyze conversations using OpenAI to extract topics, sentiment, and email triggers
+        Analyze conversations using OpenAI to extract topics, sentiment, and email triggers.
+        Improvements:
+        - Sort recent messages by timestamp (stable ordering)
+        - Use a larger window (last 50 user msgs)
+        - Backfill heuristic triggers even when LLM returns an empty list
+        - Align fallback message_type names with email_rules.yaml
         """
+        def _parse_ts(ts) -> datetime:
+            if isinstance(ts, datetime):
+                return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+            if isinstance(ts, str):
+                try:
+                    return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                except Exception:
+                    return datetime.now(timezone.utc)
+            return datetime.now(timezone.utc)
+
         if not convo_events:
             return {
                 'conversations_7d': 0,
@@ -728,11 +804,10 @@ class FeatureEngine:
                 'ai_email_triggers': [],
                 'conversation_insights': {}
             }
-        
-        # Filter user messages from recent conversations
+
+        # Keep only user messages within 7d, then sort by time
         user_messages = [e for e in convo_events if e['props'].get('role') == 'user']
-        recent_messages = [e for e in user_messages if datetime.fromisoformat(e['ts'].replace('Z', '+00:00')) >= week_ago]
-        
+        recent_messages = [e for e in user_messages if _parse_ts(e['ts']) >= week_ago]
         if not recent_messages:
             return {
                 'conversations_7d': 0,
@@ -741,97 +816,117 @@ class FeatureEngine:
                 'ai_email_triggers': [],
                 'conversation_insights': {}
             }
-        
-        # Prepare conversation data for AI analysis
+        recent_messages.sort(key=lambda m: _parse_ts(m['ts']))  # <<< important
+
+        # Prepare last N for LLM
+        WINDOW = 50
+        msgs_for_llm = recent_messages[-WINDOW:]
         conversations_for_analysis = []
-        for msg in recent_messages[-20:]:  # Analyze last 20 messages to avoid token limits
+        for msg in msgs_for_llm:
             content = msg['props'].get('content', msg['props'].get('message', ''))
-            timestamp = msg['ts']
             conversations_for_analysis.append({
                 'content': content,
-                'timestamp': timestamp,
+                'timestamp': msg['ts'],
                 'role': 'user'
             })
-        
+
+        # Helper: heuristic backfill when LLM gives no triggers
+        def _heuristic_triggers(all_msgs_text: str, topics: list) -> list:
+            t = (all_msgs_text or '').lower()
+            inferred = []
+            # crude subject guess from topics if available
+            subj_guess = None
+            if topics:
+                first = topics[0]
+                subj_guess = first.split('>')[0] if '>' in first else first
+
+            # exam tomorrow?
+            if "exam" in t and any(k in t for k in ("tomorrow", "tmrw", "next day")):
+                inferred.append({
+                    'trigger': 'exam_prep',
+                    'subject': subj_guess or 'General',
+                    'days_before': 1,
+                    'message_type': 'last_minute_prep',   # matches yaml
+                })
+
+            # appointment tomorrow?
+            if "appointment" in t and any(k in t for k in ("tomorrow", "tmrw", "next day")):
+                inferred.append({
+                    'trigger': 'appointment_reminder',
+                    'days_before': 1,
+                    'message_type': 'reminder',           # if you later add appointment rules
+                })
+
+            # learning support ask
+            if any(k in t for k in ("difficult", "hard", "struggling", "confused", "help")):
+                inferred.append({
+                    'trigger': 'learning_support',
+                    'subject': subj_guess or 'General',
+                    'days_before': 0,
+                    'message_type': 'learning_support_offer',  # matches yaml
+                })
+            return inferred
+
+        all_text = " ".join([m['content'] if isinstance(m.get('content'), str)
+                            else m.get('message', '') for m in conversations_for_analysis])
+
         try:
             import asyncio
-            
-            # Create event loop if none exists
             try:
                 loop = asyncio.get_event_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-            
-            # Run the async analysis
+
             analysis = loop.run_until_complete(
                 self.llm_service.analyze_conversations_for_triggers(conversations_for_analysis)
             )
-            
+
+            topics = analysis.get('topics') or []
+            sentiment = analysis.get('sentiment_avg', 0.0)
+            triggers = analysis.get('triggers') or analysis.get('ai_triggers') or []
+            insights = analysis.get('insights') or {}
+
+            # If LLM returned no triggers, use heuristics on the same text
+            if not triggers:
+                triggers = _heuristic_triggers(all_text, topics)
+
             return {
                 'conversations_7d': len(recent_messages),
-                'top_topics': analysis.get('topics', []),
-                'convo_sentiment_7d_avg': analysis.get('sentiment_avg', 0.0),
-                'ai_email_triggers': analysis.get('triggers', []),
-                'conversation_insights': analysis.get('insights', {})
+                'top_topics': topics,
+                'convo_sentiment_7d_avg': sentiment,
+                'ai_email_triggers': triggers,
+                'conversation_insights': insights
             }
+
         except Exception as e:
             logger.error(f"Failed to analyze conversations with AI: {str(e)}")
-            
+
+            # Fallback topics (simple keywording)
             fallback_topics = []
-            conversation_text = " ".join([msg['props'].get('content', '') for msg in recent_messages])
-            text_lower = conversation_text.lower()
-            
-            # Enhanced topic detection patterns matching actual conversation content
+            text_lower = (all_text or "").lower()
             topic_patterns = {
                 'Biology>Cells': ['cell', 'cellular', 'mitochondria', 'nucleus', 'membrane', 'organelle'],
                 'Biology>Photosynthesis': ['photosynthesis', 'chloroplast', 'light reaction', 'calvin cycle'],
-                'Biology>Cellular Mechanisms': ['cellular', 'cell', 'mechanism', 'biology', 'molecular'],
+                'Biology>Cellular Mechanisms': ['cellular', 'mechanism', 'biology', 'molecular'],
                 'Pharmacology>Antibiotics': ['antibiotic', 'antimicrobial', 'penicillin', 'vancomycin', 'resistance', 'bacteria'],
-                'Pharmacology>General': ['drug', 'medication', 'pharmacology', 'dosage', 'side effect', 'pharmacokinetics'],
-                'USMLE>Cardiology': ['heart', 'cardiac', 'ecg', 'blood pressure', 'arrhythmia', 'myocardial'],
-                'USMLE>Pharmacology': ['usmle', 'step', 'board', 'exam', 'pharmacology', 'drug interaction'],
-                'USMLE>Pathology': ['pathology', 'disease', 'diagnosis', 'symptom', 'treatment', 'pathophysiology'],
-                'Immunology>Hypersensitivity Reactions': ['hypersensitivity', 'allergy', 'immune', 'reaction', 'ige', 'anaphylaxis'],
-                'Medicine>General': ['medicine', 'medical', 'patient', 'clinical', 'therapy', 'treatment'],
-                'History>Stone Age': ['stone age', 'neolithic', 'paleolithic', 'prehistoric', 'ancient'],
-                'History>General': ['history', 'historical', 'ancient', 'civilization', 'culture'],
-                'Exam>Preparation': ['exam', 'test', 'quiz', 'preparation', 'study', 'review', 'tomorrow']
+                'History>Stone Age': ['stone age', 'neolithic', 'paleolithic'],
             }
-            
             for topic, keywords in topic_patterns.items():
-                if any(keyword in text_lower for keyword in keywords):
+                if any(k in text_lower for k in keywords):
                     fallback_topics.append(topic)
-            
-            # Generate enhanced fallback triggers based on detected patterns
-            fallback_triggers = []
-            if any(word in text_lower for word in ['exam', 'test']) and any(word in text_lower for word in ['tomorrow', 'next week', 'upcoming']):
-                subject = fallback_topics[0].split('>')[0] if fallback_topics else 'General'
-                fallback_triggers.append({
-                    'trigger': 'exam_followup',
-                    'subject': subject,
-                    'days_before': 1,
-                    'message_type': 'exam_followup_reminder'
-                })
-            
-            if any(word in text_lower for word in ['difficult', 'hard', 'struggling', 'confused', 'help']):
-                subject = fallback_topics[0] if fallback_topics else 'General'
-                fallback_triggers.append({
-                    'trigger': 'learning_support',
-                    'subject': subject,
-                    'days_before': 0,
-                    'message_type': 'learning_support_offer'
-                })
-            
+
+            fallback_triggers = _heuristic_triggers(all_text, fallback_topics)
+
             return {
                 'conversations_7d': len(recent_messages),
                 'top_topics': fallback_topics,
-                'convo_sentiment_7d_avg': 0.7,  # Assume positive sentiment for engaged learners
+                'convo_sentiment_7d_avg': 0.0,
                 'ai_email_triggers': fallback_triggers,
                 'conversation_insights': {
                     'engagement_level': 'high' if len(recent_messages) > 20 else 'medium',
-                    'learning_gaps': [topic.split('>')[1] for topic in fallback_topics if '>' in topic],
+                    'learning_gaps': [],
                     'upcoming_events': [],
-                    'needs': ['Additional practice', 'Concept clarification']
+                    'needs': [],
                 }
             }

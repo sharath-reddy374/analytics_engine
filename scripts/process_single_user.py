@@ -149,4 +149,4 @@ if __name__ == "__main__":
 
 
 
-# make process-user EMAIL=raj@edyoustudent.com
+# make process-user EMAIL=sharath_b2c@yopmail.com

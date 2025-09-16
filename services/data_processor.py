@@ -281,60 +281,123 @@ class DataProcessor:
         return all_events
     
     def process_icp_data(self, icp_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Convert ICP (Individualized Course Plans) data to normalized events"""
         events = []
-        
         print(f"🎓 Processing {len(icp_data)} ICP course records...")
-        
+
         for record in icp_data:
             try:
                 user_email = record.get('email', '')
                 course_id = record.get('id', record.get('course_id', 'unknown'))
-                
-                # Extract status information from real ICP_Prod structure
-                status = record.get('status', {})
-                if isinstance(status, dict):
-                    completed_lessons = status.get('completedLesson', 0)
-                    if hasattr(completed_lessons, '__float__'):
-                        completed_lessons = float(completed_lessons)
-                    elif not isinstance(completed_lessons, (int, float)):
-                        completed_lessons = 0
-                    
-                    total_lessons = 25  # User specified: always divide by 25 for completion percentage
-                    current_lesson = status.get('currentLesson', 1)
-                    progress = status.get('progress', 0)
-                    
-                    completion_rate = float(completed_lessons) / 25.0
-                    
-                    print(f"📚 Course {course_id}: {completed_lessons}/25 lessons = {completion_rate:.1%} complete")
-                    
-                    # Create ICP progress event
-                    event = {
-                        "event_id": self._generate_event_id(),
-                        "user_id": user_email,
-                        "ts": self._parse_timestamp(record.get('created_at', record.get('updated_at', ''))),
-                        "name": "icp_progress",
-                        "source": "web",
-                        "props": {
-                            "id": course_id,
-                            "title": record.get('title', 'Unknown Course'),
-                            "status": status,  # Include full status for FeatureEngine
-                            "completed_lessons": float(completed_lessons),  # Convert to float
-                            "total_lessons": total_lessons,
-                            "current_lesson": current_lesson,
-                            "progress": progress,
-                            "completion_rate": completion_rate
-                        }
-                    }
-                    events.append(event)
-                    
+
+                # 🔁 New: derive progress from section statuses
+                derived = self._compute_course_progress_from_sections(record)
+
+                print(
+                    f"📚 Course {course_id}: "
+                    f"{derived['completed_sections']}/{derived['total_sections']} sections "
+                    f"({derived['progress_percent']}%) complete; "
+                    f"completed lessons: {derived['completed_lessons']}/{derived['total_lessons']}"
+                )
+
+                event = {
+                    "event_id": self._generate_event_id(),
+                    "user_id": user_email,
+                    "ts": self._parse_timestamp(record.get('created_at', record.get('updated_at', ''))),
+                    "name": "icp_progress",
+                    "source": "web",
+                    "props": {
+                        "id": course_id,
+                        "title": record.get('title', 'Unknown Course'),
+                        # keep original for reference if you still store it:
+                        "status_raw": record.get('status', {}),
+                        # ✅ derived fields drive analytics/UI:
+                        "total_lessons": derived["total_lessons"],
+                        "total_sections": derived["total_sections"],
+                        "completed_lessons": derived["completed_lessons"],
+                        "completed_sections": derived["completed_sections"],
+                        "current_lesson": derived["current_lesson"],
+                        "current_section": derived["current_section"],
+                        "progress_percent": derived["progress_percent"],   # 0..100
+                        "completion_rate": derived["completion_rate"],     # 0..1
+                        "is_completed": derived["is_completed"],
+                    },
+                }
+                events.append(event)
+
             except Exception as e:
                 print(f"❌ Error processing ICP record: {e}")
                 continue
-        
+
         print(f"✅ Generated {len(events)} ICP progress events")
         return events
-    
+
+
+
+    def _compute_course_progress_from_sections(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        lessons = record.get("lessons", []) or []
+        # Sort by lesson.order (fallback to index), then section.order (fallback to index)
+        def lesson_key(idx_l, l): return (l.get("order") or idx_l + 1)
+        def section_key(idx_s, s): return (s.get("order") or idx_s + 1)
+
+        total_sections = 0
+        completed_sections = 0
+        total_lessons = len(lessons)
+        completed_lessons = 0
+
+        first_incomplete_lesson_order = None
+        first_incomplete_section_id = None
+
+        for li, lesson in sorted(enumerate(lessons), key=lambda t: lesson_key(*t)):
+            sections = lesson.get("sections", []) or []
+            total_sections += len(sections)
+
+            # Count section completion per lesson
+            comp_in_lesson = 0
+            found_incomplete_in_this_lesson = False
+
+            for si, section in sorted(enumerate(sections), key=lambda t: section_key(*t)):
+                is_done = bool(section.get("status", False))
+                if is_done:
+                    comp_in_lesson += 1
+                    completed_sections += 1
+                elif first_incomplete_section_id is None and not found_incomplete_in_this_lesson:
+                    # First incomplete section across entire course
+                    first_incomplete_section_id = section.get("id", None)
+                    first_incomplete_lesson_order = lesson.get("order", li + 1)
+                    found_incomplete_in_this_lesson = True
+
+            if sections and comp_in_lesson == len(sections):
+                completed_lessons += 1
+
+        # Progress calculations
+        progress_pct = round((completed_sections / total_sections) * 100.0, 2) if total_sections else 0.0
+        is_completed = (total_sections > 0 and completed_sections == total_sections)
+
+        # Current pointers (fallbacks if everything is complete or no sections exist)
+        if is_completed and total_sections > 0:
+            # Point to last lesson/section by order
+            last_lesson = max(lessons, key=lambda l: l.get("order", 0)) if lessons else {}
+            last_sections = (last_lesson or {}).get("sections", []) or []
+            last_section = max(last_sections, key=lambda s: s.get("order", 0)) if last_sections else {}
+            current_lesson = last_lesson.get("order", total_lessons or 1)
+            current_section = last_section.get("id", None)
+        else:
+            current_lesson = first_incomplete_lesson_order or (lessons[0].get("order", 1) if lessons else 1)
+            current_section = first_incomplete_section_id
+
+        return {
+            "total_lessons": total_lessons,
+            "total_sections": total_sections,
+            "completed_lessons": completed_lessons,
+            "completed_sections": completed_sections,
+            "progress_percent": progress_pct,
+            "completion_rate": (completed_sections / total_sections) if total_sections else 0.0,
+            "is_completed": is_completed,
+            "current_lesson": current_lesson,
+            "current_section": current_section,
+        }
+
+
     def _generate_event_id(self) -> str:
         """Generate a unique event ID"""
         import uuid
