@@ -318,20 +318,31 @@ class DecisionEngine:
         return True
     
     def _is_within_send_hours(self, user: AppUser) -> bool:
-        """Check if current time is within user's send hours"""
+        """Return True if NOW (user's local time) is outside quiet hours."""
         from config.settings import settings
-        
         try:
-            user_tz = pytz.timezone(user.tz or 'America/Los_Angeles')
-            user_time = datetime.now(user_tz)
-            current_hour = user_time.hour
-            
-            # Check if within allowed hours (8 AM to 8 PM local time)
-            return settings.EMAIL_QUIET_HOURS_END <= current_hour < settings.EMAIL_QUIET_HOURS_START
+            user_tz = pytz.timezone(getattr(user, 'tz', None) or 'America/Los_Angeles')
+            hour = datetime.now(user_tz).hour
+
+            q_start = int(settings.EMAIL_QUIET_HOURS_START)  # e.g., 20 (8pm)
+            q_end   = int(settings.EMAIL_QUIET_HOURS_END)    # e.g., 8  (8am)
+
+            if q_start == q_end:
+                # degenerate: no quiet hours
+                return True
+
+            if q_start < q_end:
+                # Quiet window does NOT cross midnight (e.g., 22 -> 6 is NOT this case)
+                in_quiet = (q_start <= hour < q_end)
+            else:
+                # Quiet window crosses midnight (e.g., 20 -> 8)
+                in_quiet = (hour >= q_start) or (hour < q_end)
+
+            return not in_quiet
         except Exception as e:
-            logger.warning(f"Failed to check send hours for user {user.user_id}: {str(e)}")
-            return True  # Default to allowing send
-    
+            logger.warning(f"Failed to check send hours for user {getattr(user, 'user_id', 'unknown')}: {str(e)}")
+            return True  # be permissive on failure
+
     def _evaluate_rules_for_user(self, user_features: UserDailyFeatures) -> List[Dict[str, Any]]:
         """Evaluate all rules for a specific user"""
         matching_rules = []
@@ -374,15 +385,16 @@ class DecisionEngine:
             return self._evaluate_condition_dict(conditions, features)
     
     def _evaluate_condition(self, condition: Dict[str, Any], user_features: UserDailyFeatures) -> bool:
-        """Evaluate a single condition"""
-        
+        """Evaluate a single condition against ORM model (DB path)."""
         for operator, params in condition.items():
-            field = params['field']
-            value = params['value']
-            
-            # Get field value from user features
+            field = params.get('field')
+            value = params.get('value')
+            pattern = params.get('pattern')
+            trigger_type = params.get('trigger_type')
+
+            # Pull raw field value off the ORM row
             field_value = getattr(user_features, field, None)
-            
+
             if operator == 'eq':
                 return field_value == value
             elif operator == 'ne':
@@ -408,24 +420,25 @@ class DecisionEngine:
                     return value not in field_value
                 return True
             elif operator == 'contains_pattern':
-                if isinstance(field_value, list):
-                    if value.endswith('*'):
-                        # Wildcard pattern matching (e.g., 'Biology>*' matches any Biology subtopic)
-                        prefix = value[:-1]
-                        return any(item.startswith(prefix) for item in field_value)
+                # supports {"pattern": "Biology>*"}
+                if isinstance(field_value, list) and isinstance(pattern, str):
+                    if pattern.endswith('*'):
+                        prefix = pattern[:-1]
+                        return any(isinstance(item, str) and item.startswith(prefix) for item in field_value)
                     else:
-                        return value in field_value
+                        return pattern in field_value
                 return False
             elif operator == 'contains_trigger':
-                if isinstance(field_value, list):
+                # supports {"trigger_type": "post_exam"} etc.
+                if isinstance(field_value, list) and isinstance(trigger_type, str):
                     return any(
-                        isinstance(trigger, dict) and trigger.get('trigger') == value
-                        for trigger in field_value
+                        isinstance(t, dict) and (t.get('trigger') == trigger_type or t.get('trigger_type') == trigger_type)
+                        for t in field_value
                     )
                 return False
-        
+
         return False
-    
+
     def _evaluate_condition_dict(self, condition: Dict[str, Any], features: Dict[str, Any]) -> bool:
         """Evaluate a single condition against features dictionary"""
         
@@ -498,33 +511,64 @@ class DecisionEngine:
         return filtered_candidates
     
     def _is_rule_in_cooldown(self, user_id: str, rule_id: str, db: Session) -> bool:
-        """Check if rule is in cooldown period for user"""
-        
-        # Find the rule to get cooldown period
+        """Check if rule is in cooldown period for user."""
         rule = next((r for r in self.rules if r['id'] == rule_id), None)
         if not rule:
             return True
-        
         cooldown_days = rule['action'].get('cooldown_days', 1)
-        cutoff_date = datetime.utcnow() - timedelta(days=cooldown_days)
-        
-        # Check if this rule was used recently
-        recent_email = db.query(EmailSend).filter(
-            EmailSend.user_id == user_id,
-            EmailSend.ts >= cutoff_date,
-            EmailSend.meta['rule_id'].astext == rule_id
-        ).first()
-        
-        return recent_email is not None
-    
+        cutoff = datetime.utcnow() - timedelta(days=cooldown_days)
+
+        try:
+            recent = db.query(EmailSend).filter(
+                EmailSend.user_id == user_id,
+                EmailSend.ts >= cutoff,
+                EmailSend.meta['rule_id'].astext == rule_id
+            ).first()
+            return recent is not None
+        except Exception:
+            # Fallback: fetch a handful and check in Python
+            recent_list = db.query(EmailSend).filter(
+                EmailSend.user_id == user_id,
+                EmailSend.ts >= cutoff
+            ).order_by(EmailSend.ts.desc()).limit(25).all()
+            for e in recent_list:
+                meta = getattr(e, 'meta', {}) or {}
+                if isinstance(meta, dict) and meta.get('rule_id') == rule_id:
+                    return True
+            return False
+
     def _serialize_features(self, user_features: UserDailyFeatures) -> Dict[str, Any]:
-        """Serialize user features for email template"""
+        """Expose enough context for content generation."""
         return {
+            'email': getattr(user_features, 'email', None) or None,  # if you store it; optional
             'recency_days': user_features.recency_days,
             'frequency_7d': user_features.frequency_7d,
             'minutes_7d': user_features.minutes_7d,
             'tests_7d': user_features.tests_7d,
+            'test_accuracy': getattr(user_features, 'test_accuracy', None),
+            'avg_itp_score': getattr(user_features, 'avg_itp_score', None),
+            'itp_improvement_trend': getattr(user_features, 'itp_improvement_trend', None),
+
+            'icp_completion_rate': getattr(user_features, 'icp_completion_rate', None),
+            'active_courses': getattr(user_features, 'active_courses', 0),
+            'completed_courses': getattr(user_features, 'completed_courses', 0),
+            'completed_course_titles': getattr(user_features, 'completed_course_titles', []) or [],
+            'stalled_courses': getattr(user_features, 'stalled_courses', []) or [],
+            'recent_progress': getattr(user_features, 'recent_progress', False),
+
+            'conversations_7d': getattr(user_features, 'conversations_7d', 0),
             'top_topics': user_features.top_topics or [],
+            'convo_sentiment_7d_avg': getattr(user_features, 'convo_sentiment_7d_avg', 0.0),
+            'ai_email_triggers': getattr(user_features, 'ai_email_triggers', []) or [],
+            'conversation_insights': getattr(user_features, 'conversation_insights', {}) or {},
+
+            'has_exam_last_minute_prep': getattr(user_features, 'has_exam_last_minute_prep', False),
+            'has_exam_post_checkin': getattr(user_features, 'has_exam_post_checkin', False),
+            'has_learning_support': getattr(user_features, 'has_learning_support', False),
+
             'subject_affinity': user_features.subject_affinity or {},
-            'churn_risk': user_features.churn_risk
+            'churn_risk': user_features.churn_risk,
+            'last_email_ts': getattr(user_features, 'last_email_ts', None),
+            'emails_sent_7d': getattr(user_features, 'emails_sent_7d', 0),
+            'unsubscribed': user_features.unsubscribed,
         }

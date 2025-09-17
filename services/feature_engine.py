@@ -4,6 +4,9 @@ from database.models import Event, UserDailyFeatures, AppUser, ConvoSummary, Ema
 from datetime import datetime, date, timedelta, timezone
 from typing import Dict, Any, List
 import logging
+from typing import Optional, List, Any
+import typing as t
+
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +122,7 @@ class FeatureEngine:
             'has_exam_post_checkin': False,
             'has_learning_support': False,
         }
-    
+
     def _calculate_presentation_minutes_from_events(self, events: List[Dict], since_date: datetime) -> int:
         """Calculate presentation minutes from normalized events"""
         recent_events = [e for e in events if datetime.fromisoformat(e['ts'].replace('Z', '+00:00')) >= since_date]
@@ -215,10 +218,18 @@ class FeatureEngine:
             Event.user_id == user_id,
             Event.ts >= week_ago,
             Event.ts <= today,
-            Event.name == 'login_session'
+            Event.name.in_(['login_session', 'login'])  # <-- include both
         ).all()
         
-        minutes_7d = self._calculate_login_minutes(login_events)
+        # Fallback data: recent convo messages (to estimate time if session times are missing)
+        convo_events_recent = db.query(Event).filter(
+            Event.user_id == user_id,
+            Event.ts >= week_ago,
+            Event.ts <= today,
+            Event.name == 'convo_msg'
+        ).all()
+
+        minutes_7d = self._calculate_login_minutes(login_events, convo_events_recent) 
         
         # Test attempts in last 7 days
         tests_7d = db.query(func.count(Event.event_id)).filter(
@@ -306,38 +317,83 @@ class FeatureEngine:
             'has_learning_support': has_learning_support,
         }
     
-    def _calculate_login_minutes(self, events: List[Dict]) -> int:
-        """Calculate total minutes from login session durations"""
+    def _calculate_login_minutes(self, login_events: List[Any], convo_events_recent: Optional[List[Any]] = None) -> int:
+        """
+        Calculate total minutes from login session durations (DB path).
+        - Supports:
+            - props['Session'] = {'start_time': iso, 'end_time': iso}
+            - props['login_time'] / props['logout_time']
+            - props['session_duration_minutes']
+        - If none available, falls back to estimating time from recent conversation messages.
+        Caps each session at 180 minutes.
+        """
         total_minutes = 0
-        
-        # Group events by session and calculate time spent
-        login_sessions = {}
-        
-        for event in events:
-            session_id = event.props.get('session_id')
-            if not session_id:
-                continue
-            
-            if session_id not in login_sessions:
-                login_sessions[session_id] = {'start': None, 'end': None}
-            
-            login_time = event.props.get('login_time')
-            logout_time = event.props.get('logout_time')
-            session_duration = event.props.get('session_duration_minutes')
-            
-            if login_time:
-                login_sessions[session_id]['start'] = datetime.fromisoformat(login_time.replace('Z', '+00:00'))
-            if logout_time:
-                login_sessions[session_id]['end'] = datetime.fromisoformat(logout_time.replace('Z', '+00:00'))
-        
-        # Calculate duration for each session
-        for session in login_sessions.values():
-            if session['start'] and session['end']:
-                duration = (session['end'] - session['start']).total_seconds() / 60
-                total_minutes += max(0, min(duration, 180))  # Cap at 3 hours per session
-        
+        sessions = {}
+
+        for event in login_events or []:
+            props = getattr(event, 'props', {}) or {}
+            session_id = props.get('session_id') or props.get('SessionID') or getattr(event, 'event_id', None)
+
+            if session_id and session_id not in sessions:
+                sessions[session_id] = {'start': None, 'end': None, 'added': False}
+
+            # 1) Nested Session object
+            sess = props.get('Session') or {}
+            if isinstance(sess, dict):
+                start_time = sess.get('start_time') or sess.get('start') or sess.get('login_time')
+                end_time   = sess.get('end_time')   or sess.get('end')   or sess.get('logout_time')
+                if start_time and end_time:
+                    try:
+                        from datetime import datetime
+                        start_dt = datetime.fromisoformat(str(start_time).replace('Z', '+00:00'))
+                        end_dt   = datetime.fromisoformat(str(end_time).replace('Z', '+00:00'))
+                        duration = max(0.0, (end_dt - start_dt).total_seconds() / 60.0)
+                        total_minutes += min(duration, 180)
+                        if session_id: sessions[session_id]['added'] = True
+                        continue
+                    except Exception:
+                        pass
+
+            # 2) Explicit times on props
+            login_time  = props.get('login_time')
+            logout_time = props.get('logout_time')
+            if login_time and logout_time:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(str(login_time).replace('Z', '+00:00'))
+                    end_dt   = datetime.fromisoformat(str(logout_time).replace('Z', '+00:00'))
+                    duration = max(0.0, (end_dt - start_dt).total_seconds() / 60.0)
+                    total_minutes += min(duration, 180)
+                    if session_id: sessions[session_id]['added'] = True
+                    continue
+                except Exception:
+                    pass
+
+            # 3) Precomputed duration
+            dur = props.get('session_duration_minutes') or props.get('duration_minutes')
+            if dur is not None:
+                try:
+                    total_minutes += min(float(dur), 180)
+                    if session_id: sessions[session_id]['added'] = True
+                    continue
+                except Exception:
+                    pass
+
+        # 4) Fallback: estimate from conversation volume (if we couldn't add anything above)
+        #    Roughly 1.5 minutes per message, capped at 90.
+        if total_minutes == 0 and convo_events_recent:
+            conv_msgs = 0
+            for ev in convo_events_recent:
+                p = getattr(ev, 'props', {}) or {}
+                # count only user messages if 'role' is available; otherwise count all
+                role = (p.get('role') or '').lower()
+                if not role or role == 'user':
+                    conv_msgs += 1
+            if conv_msgs > 0:
+                total_minutes = min(conv_msgs * 1.5, 90)
+
         return int(total_minutes)
-    
+
     def _calculate_score_trend(self, user_id: str, start_date: datetime, end_date: datetime, db: Session) -> float:
         """Calculate average score change trend"""
         test_events = db.query(Event).filter(
@@ -390,33 +446,80 @@ class FeatureEngine:
         return [topic for topic, count in sorted_topics[:5]]
     
     def _calculate_subject_affinity(self, user_id: str, start_date: datetime, end_date: datetime, db: Session) -> Dict[str, float]:
-        """Calculate subject affinity scores"""
+        """
+        Calculate subject affinity from a mix of signals:
+        - Event.props['subject'] | 'Subject' | 'course_subject' | 'course' | derived from 'topic' like "Biology>Cells"
+        - ConvoSummary.topics (fallback / supplement)
+        Weighted by recency (last 30 days heavier).
+        """
+        from datetime import datetime
         events = db.query(Event).filter(
             Event.user_id == user_id,
             Event.ts >= start_date,
             Event.ts <= end_date,
             Event.name.in_(['test_attempt', 'presentation_progress', 'convo_msg'])
         ).all()
-        
-        subject_time = {}
-        total_time = 0
-        
-        for event in events:
-            subject = event.props.get('subject')
-            if subject:
-                # Weight recent events more heavily
-                days_ago = (datetime.utcnow() - event.ts).days
-                weight = max(0.1, 1.0 - (days_ago / 30.0))
-                
-                subject_time[subject] = subject_time.get(subject, 0) + weight
-                total_time += weight
-        
-        # Normalize to probabilities
-        if total_time > 0:
-            return {subject: time / total_time for subject, time in subject_time.items()}
-        else:
+
+        subject_time: Dict[str, float] = {}
+        total_time = 0.0
+
+        def bump(subj: Optional[str], weight: float):
+            nonlocal total_time
+            if not subj:
+                return
+            s = subj.strip()
+            if not s:
+                return
+            subject_time[s] = subject_time.get(s, 0.0) + weight
+            total_time += weight
+
+        # --- From events
+        now = datetime.utcnow()
+        for ev in events:
+            props = getattr(ev, 'props', {}) or {}
+            # known fields
+            subj = (
+                props.get('subject')
+                or props.get('Subject')
+                or props.get('course_subject')
+                or props.get('course')
+            )
+            # derive from topic like "Biology>Cells"
+            if not subj:
+                topic = props.get('topic') or props.get('Topic')
+                if isinstance(topic, str) and '>' in topic:
+                    subj = topic.split('>')[0].strip()
+            # derive from convo content tag if you store something like props['subject_tag']
+            if not subj:
+                subj = props.get('subject_tag')
+
+            # recency weight: up to ~30 days decay
+            ts = getattr(ev, 'ts', None)
+            days_ago = (now - ts).days if isinstance(ts, datetime) else 0
+            weight = max(0.1, 1.0 - (days_ago / 30.0))
+
+            bump(subj, weight)
+
+        # --- Supplement with ConvoSummary.topics if sparse
+        summaries = db.query(ConvoSummary).filter(
+            ConvoSummary.user_id == user_id,
+            ConvoSummary.started_at >= start_date,
+            ConvoSummary.started_at <= end_date
+        ).all()
+
+        for s in summaries:
+            for t in (s.topics or []):
+                # t could be "Biology>Cells" or a bare subject word
+                subj = t.split('>')[0].strip() if isinstance(t, str) and '>' in t else t
+                # lighter weight than explicit event-subject, but still counts
+                bump(subj, 0.5)
+
+        if total_time <= 0:
             return {}
-    
+
+        # normalize
+        return {k: v / total_time for k, v in subject_time.items()}
+
     def _calculate_sentiment_avg(self, user_id: str, start_date: datetime, end_date: datetime, db: Session) -> float:
         """Calculate average conversation sentiment"""
         summaries = db.query(ConvoSummary).filter(

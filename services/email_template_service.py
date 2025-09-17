@@ -55,20 +55,77 @@ class EmailTemplateService:
         Generate educational email content dynamically using OpenAI.
         If the LLM output doesn't match the intended purpose, fall back to a
         deterministic, purpose-specific subject and body.
+
+        NEW: Adds a sanitizer so overall ITP/ICP metrics are not misrepresented
+        as subject-specific (e.g., “IELTS progress 66%”) unless you truly have
+        per-subject metrics.
         """
         try:
-            # Resolve rule_id from template_id for the LLM
+            # --- Helpers (scoped to this call) ---------------------------------
+            import re
+
+            def _has_percent_number(text: str) -> bool:
+                return bool(re.search(r"\b\d{1,3}\s?%\b", text or "", flags=re.IGNORECASE))
+
+            def _sentence_split(text: str) -> List[str]:
+                # Simple sentence split (avoid heavy libs)
+                # Keeps punctuation; good enough for post-editing
+                return re.split(r'(?<=[\.\!\?])\s+', text.strip()) if text else []
+
+            def _join_sentences(sents: List[str]) -> str:
+                return " ".join(s.strip() for s in sents if s and s.strip())
+
+            def _sanitize_subject_specific_metrics(subject: str, body: str, subject_scope_has_metrics: bool) -> str:
+                """
+                Remove any sentences that present percentages/accuracy/progress as if
+                they belong to the specific subject when we don't have subject metrics.
+                """
+                if subject_scope_has_metrics or not body:
+                    return body
+
+                sents = _sentence_split(body)
+                cleaned: List[str] = []
+                subj_l = (subject or "").lower()
+
+                # Keywords that usually bind numbers to performance/progress claims
+                perf_keywords = [
+                    "progress", "completion", "complete", "accuracy", "score",
+                    "performance", "percent", "percentage", "rate"
+                ]
+
+                for s in sents:
+                    s_l = s.lower()
+
+                    # If the sentence contains a % AND mentions performance-ish words,
+                    # AND also mentions the chosen subject, drop it.
+                    mentions_percent = _has_percent_number(s)
+                    mentions_perf_kw = any(k in s_l for k in perf_keywords)
+                    mentions_subject = subj_l and subj_l in s_l
+
+                    if mentions_percent and mentions_perf_kw and mentions_subject:
+                        # Drop the sentence to avoid misattribution.
+                        continue
+
+                    cleaned.append(s)
+
+                # If we dropped everything (rare), keep the original body to avoid empty emails
+                return _join_sentences(cleaned) or body
+
+            # Subject-specific metrics availability (you can wire this up later;
+            # for now we assume you DON'T have per-subject metrics, so set False)
+            SUBJECT_METRICS_AVAILABLE = False
+
+            # --- Resolve mapping & context --------------------------------------
             rule_id = self._template_to_rule(template_id)
             user_email = features.get('email', 'student@example.com')
 
-            # Determine purpose from triggers/state for alignment + fallback copy
             purpose = self._determine_email_purpose(template_id, features, ai_triggers)
             email_context = self._build_email_context(features, ai_triggers, purpose)
 
-            # Build purpose-specific subject/body (deterministic)
+            # Build purpose-specific subject/body (deterministic fallback)
             fallback_subject, fallback_body = self._compose_subject_content(email_context)
 
-            # Try LLM
+            # --- Call LLM --------------------------------------------------------
             try:
                 # Reuse or create an event loop safely
                 try:
@@ -77,21 +134,45 @@ class EmailTemplateService:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
 
+                # Preferred subject/day passed for steering
+                preferred_subject = email_context.get('subject_area')
+                day_hint = email_context.get('day_hint')
+
+                # Also pass a nudge that metrics are OVERALL unless you wire per-subject later
+                # Many LLM wrappers simply ignore extra kwargs; this is harmless if unsupported.
                 email_result = loop.run_until_complete(
                     self.llm_service.generate_educational_email(
-                        rule_id,                          # pass RULE ID
-                        features,                         # user_features
-                        user_email,                       # user_email
-                        preferred_subject=email_context.get('subject_area'),
-                        day_hint=email_context.get('day_hint')
+                        rule_id,
+                        features,
+                        user_email,
+                        preferred_subject=preferred_subject,
+                        day_hint=day_hint,
+                        metrics_scope="overall",  # <-- IMPORTANT NUDGE
+                        instructions_extra=(
+                            "If you mention progress or accuracy, make clear they are overall metrics. "
+                            "Do NOT attach percentages to a specific subject or exam unless explicitly given per-subject."
+                        )
                     )
                 )
 
                 llm_subject = (email_result or {}).get('subject') or ''
                 llm_body = (email_result or {}).get('content') or ''
 
-                # If LLM output doesn't align with purpose/subject urgency, use fallback
-                if not self._is_alignment_ok(purpose, llm_subject, llm_body, email_context):
+                # --- Sanitize cross-subject metric claims -----------------------
+                llm_body_sanitized = _sanitize_subject_specific_metrics(
+                    subject=preferred_subject or '',
+                    body=llm_body,
+                    subject_scope_has_metrics=SUBJECT_METRICS_AVAILABLE
+                )
+                # If subject line contains a percent & the subject name, strip it too
+                if (preferred_subject and not SUBJECT_METRICS_AVAILABLE
+                    and _has_percent_number(llm_subject)
+                    and (preferred_subject.lower() in llm_subject.lower())):
+                    # Remove the % number fragments in subject (simple scrub)
+                    llm_subject = re.sub(r"\b\d{1,3}\s?%\b", "", llm_subject).replace("  ", " ").strip(" -,:;")
+
+                # --- Final alignment check --------------------------------------
+                if not self._is_alignment_ok(purpose, llm_subject, llm_body_sanitized, email_context):
                     logger.debug(
                         "LLM output misaligned with purpose '%s' — using fallback. "
                         "(rule_id=%s, template_id=%s, subject='%s')",
@@ -99,15 +180,15 @@ class EmailTemplateService:
                     )
                     subject, content = fallback_subject, fallback_body
                 else:
-                    subject, content = llm_subject, llm_body
+                    subject, content = llm_subject, llm_body_sanitized
 
             except Exception as e:
                 logger.warning("OpenAI generation failed, using fallback: %s", str(e))
                 subject, content = fallback_subject, fallback_body
 
             return {
-                'subject': subject.strip(),
-                'content': content.strip(),
+                'subject': (subject or "").strip(),
+                'content': (content or "").strip(),
                 'template_id': template_id,
                 'generated_at': datetime.now().isoformat(),
                 'rule_id': rule_id,  # helpful for observability
@@ -397,21 +478,22 @@ Small, consistent steps compound. I can queue a 10-minute set right now — just
 
     # ---- Alignment guard ----------------------------------------------------
     def _is_alignment_ok(self, purpose: str, subject: str, body: str, ctx: Dict[str, Any]) -> bool:
-        """
-        Purpose-vs-copy sanity check.
-        Also enforces that, when we selected a specific subject/day from triggers
-        (e.g., "Physics" + "tonight"), the LLM output mentions them (with synonyms allowed).
-        """
         s = f"{subject} {body}".lower()
 
         def has_any(*words) -> bool:
             return any(w in s for w in words)
 
-        # If we selected a subject/day from triggers, enforce it shows up
         chosen_subject = (ctx.get('subject_area') or '').lower().strip()
         day_hint = (ctx.get('day_hint') or '').lower().strip()
 
-        # Day synonyms (kept minimal; you can expand any time)
+        # NEW: fail if another known subject is mentioned
+        primary_subjects = ctx.get("user_profile", {}).get("primary_subjects", []) or []
+        forbidden_subjects = [x for x in primary_subjects if x and x.lower() != chosen_subject]
+        if forbidden_subjects:
+            for forb in forbidden_subjects:
+                if forb.lower() in s:
+                    return False
+
         DAY_SYNONYMS = {
             'tonight': ['tonight', 'this evening', 'evening', 'later this evening'],
             'today':   ['today', 'this afternoon', 'this morning', 'later today', 'in a few hours'],
@@ -437,10 +519,48 @@ Small, consistent steps compound. I can queue a 10-minute set right now — just
             return has_any('appointment', 'session', 'follow-up', 'follow up', 'went')
         if purpose == 'completion_celebration':
             return has_any('congrats', 'congratulations', 'completed', 'finish', 'finished')
-        # Others can be looser
         return True
 
+
     # ---- Utility helpers ----------------------------------------------------
+    def _sanitize_subject_bleed(
+        self,
+        chosen_subject: Optional[str],
+        subjects_ordered: List[str],
+        text_subject: str,
+        text_body: str,
+    ) -> Tuple[str, str]:
+        """
+        Remove lines/sentences that mention subjects other than the chosen one.
+        Conservative: only filters when we have a known chosen_subject.
+        """
+        if not chosen_subject:
+            return text_subject, text_body
+
+        chosen = chosen_subject.lower()
+        others = [s for s in subjects_ordered if s and s.lower() != chosen]
+        if not others:
+            return text_subject, text_body
+
+        # Simple token-based filtering
+        def drop_other_subject_lines(text: str) -> str:
+            lines = re.split(r'(\n|[.!?](?:\s|$))', text)  # keep delimiters
+            out = []
+            buf = ""
+            for chunk in lines:
+                buf += chunk
+                if chunk in ("\n",) or re.match(r'[.!?](?:\s|$)', chunk or ""):
+                    ck = buf.lower()
+                    if not any(o.lower() in ck for o in others):
+                        out.append(buf)
+                    buf = ""
+            # append any remainder
+            if buf and not any(o.lower() in buf.lower() for o in others):
+                out.append(buf)
+            return "".join(out).strip()
+
+        return drop_other_subject_lines(text_subject), drop_other_subject_lines(text_body)
+
 
     def _determine_learning_level(self, features: Dict[str, Any]) -> str:
         topics = features.get('top_topics', [])
@@ -518,10 +638,15 @@ Small, consistent steps compound. I can queue a 10-minute set right now — just
         def normalize_time_hint_from_str(s: str) -> Tuple[str, int, int]:
             """
             Map free-text timeframes to (hint, days, hours).
-            hint in {'tonight','today','tomorrow','soon'}; smaller days/hours => more urgent.
+            'minutes' is treated as ultra-urgent: today with negative hours to boost score.
             """
             txt = (s or '').lower()
-            # explicit hours: "in 2 hours", "in 5h"
+            # minutes: "in 5 minutes", "in 30 min", "in 15m"
+            m = re.search(r'in\s+(\d+)\s*(?:minutes|min|m)\b', txt)
+            if m:
+                return ('today', 0, -10)  # negative hours => higher urgency in scoring
+
+            # hours: "in 2 hours", "in 5h"
             m = re.search(r'in\s+(\d+)\s*(?:hours|hour|h)\b', txt)
             if m:
                 hours = int(m.group(1))

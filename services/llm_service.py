@@ -157,89 +157,150 @@ class LLMService:
         rule_id: str,
         user_features: Dict[str, Any],
         user_email: str,
-        preferred_subject: Optional[str] = None,
-        day_hint: Optional[str] = None
+        **kwargs,  # <- accept optional steering hints
     ) -> Dict[str, str]:
         """
-        Generate educational email content based on rule and user features.
-        Now accepts preferred_subject + day_hint so urgent triggers (e.g. IELTS tonight)
-        override generic top_topics.
+        Generate short educational email copy. Supports optional hints:
+          - preferred_subject: str | None    e.g., "IELTS", "Biology"
+          - day_hint: str | None             one of: tonight|today|tomorrow|soon
+          - metrics_scope: "overall"|"subject" (default "overall")
+          - instructions_extra: str          additional guardrails
+
+        Returns {"subject": "...", "content": "..."}.
+        Never invent per-subject percentages/accuracy unless explicitly provided.
         """
-        try:
-            first_name = user_features.get('first_name', user_email.split('@')[0].title())
-            top_topics = user_features.get('top_topics', [])
-            engagement_level = 'high' if user_features.get('frequency_7d', 0) > 50 else 'medium'
-            course_completion = user_features.get('icp_completion_rate', 0)
-            test_accuracy = user_features.get('test_accuracy', 0)
+        preferred_subject: Optional[str] = kwargs.get("preferred_subject")
+        day_hint: Optional[str] = kwargs.get("day_hint")
+        metrics_scope: str = kwargs.get("metrics_scope") or "overall"
+        instructions_extra: str = kwargs.get("instructions_extra") or ""
 
-            preferred_subject = preferred_subject or (
-                (top_topics[0].split('>')[0]) if top_topics else 'General studies'
+        # Derive a friendly first name
+        first_name = user_features.get("first_name")
+        if not first_name:
+            try:
+                first_name = user_email.split("@")[0]
+            except Exception:
+                first_name = "Student"
+        first_name = (first_name or "Student").title()
+
+        top_topics = user_features.get("top_topics", []) or []
+        test_accuracy_overall = user_features.get("test_accuracy")
+        course_completion_overall = user_features.get("icp_completion_rate")
+
+        # Build steering lines
+        subject_line_nudge = ""
+        body_opening_nudge = ""
+        if rule_id == "exam_last_minute_prep":
+            # Keep this generic enough to work for any subject/exam
+            if preferred_subject and day_hint:
+                subject_line_nudge = f"{day_hint.title()}’s {preferred_subject} exam"
+                body_opening_nudge = f"Your {preferred_subject} exam is {day_hint}."
+            elif preferred_subject:
+                subject_line_nudge = f"{preferred_subject} exam"
+                body_opening_nudge = f"Your {preferred_subject} exam is coming up."
+            elif day_hint:
+                subject_line_nudge = f"{day_hint.title()}’s exam"
+                body_opening_nudge = f"Your exam is {day_hint}."
+
+        # Guardrails about metrics
+        if metrics_scope == "overall":
+            metrics_rules = (
+                "Do NOT state or imply per-subject percentages/accuracy/progress. "
+                "If you mention progress or accuracy, make it clear these are overall metrics "
+                "across studies; better yet, avoid numeric percentages entirely."
             )
-            day_hint = (day_hint or '').strip()  # "", "tonight", "today", "tomorrow", "soon"
+        else:
+            metrics_rules = (
+                "Only mention per-subject metrics if they are explicitly provided. "
+                "Never invent numbers."
+            )
 
-            # Build explicit, overridable instructions
-            time_context = ""
-            if day_hint:
-                time_context = f"\n- TIME CONTEXT: The correct time descriptor you MUST use is \"{day_hint}\".\n"
+        # Compose the prompt
+        prompt = f"""
+Return ONLY valid JSON with keys "subject" and "content", nothing else.
 
-            prompt = f"""
-You are writing a short, supportive educational email.
+Student: {first_name}
+Rule: {rule_id}
+PreferredSubjectHint: {preferred_subject or "None"}
+DayHint: {day_hint or "None"}
+TopTopics (for context only): {top_topics}
 
-HARD REQUIREMENTS:
-- PURPOSE is "{rule_id}". Always write copy suited to that purpose.
-- PREFERRED_SUBJECT is "{preferred_subject}". You MUST focus on this subject. Ignore other subjects if mentioned elsewhere.
-{time_context}- Keep it to 2–3 sentences total.
-- Output must be STRICT JSON with keys "subject" and "content" only.
+Requirements:
+- 2–3 sentences max in the email body, supportive, actionable.
+- If Rule is "exam_last_minute_prep" and hints are present, include the subject/day in BOTH subject and body.
+- {metrics_rules}
+- Avoid making up facts, scores, dates, or links.
+- Tone: encouraging, academic coach, concise.
 
-CONTEXT:
-- Student name: {first_name}
-- Engagement level: {engagement_level}
-- Course progress: {course_completion:.0%}
-- Test performance: {test_accuracy:.0%}
-- Recent topics (for reference only): {', '.join(topics if (topics := [t for t in top_topics]) else ['General studies'])}
+Style nudges (use if they fit):
+- Subject should be short and actionable.
+- If day hint given (tonight/today/tomorrow), reflect immediacy.
 
-STYLE & TEMPLATES:
-- Be encouraging, specific, and actionable.
-- If PURPOSE is "exam_last_minute_prep":
-  - Subject should include the TIME CONTEXT word (if provided) and the PREFERRED_SUBJECT.
-  - Example subject: "Tonight’s {preferred_subject} exam: 45-minute crash plan ✅"
-  - Body: a compact, practical mini-plan (no more than 2–3 sentences total).
-- If PURPOSE is "exam_post_checkin": ask how it went and offer a short debrief.
-- If PURPOSE is "course_completion_celebration": congratulate + suggest next step.
+{("Extra instructions: " + instructions_extra) if instructions_extra else ""}
 
-Return ONLY JSON:
+Examples of acceptable subjects (not literal):
+- "Tonight’s IELTS exam: 45-minute crash plan"
+- "Tomorrow’s Biology exam: quick last-minute checklist"
+
+Now produce JSON:
 {{
-  "subject": "…",
-  "content": "…"
+  "subject": "S concise subject line{(' — ' + subject_line_nudge) if subject_line_nudge else ''}",
+  "content": "{body_opening_nudge + ' ' if body_opening_nudge else ''}<<Write 2–3 supportive, actionable sentences with no fabricated metrics.>>"
 }}
-"""
+""".strip()
 
+        try:
             if self.client:
-                response = self.client.chat.completions.create(
+                resp = self.client.chat.completions.create(
                     model="gpt-4",
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.5,
-                    max_tokens=220
+                    max_tokens=220,
                 )
-                result = _safe_json_extract(response.choices[0].message.content)
-                subject = result.get('subject') or f"Keep learning, {first_name}!"
-                content = result.get('content') or f"Hi {first_name}! Quick study nudge for {preferred_subject}."
-                return {'subject': subject, 'content': content}
-            else:
-                # Fallback if no client
-                subject_time = (day_hint.capitalize() + "’s ") if day_hint else ""
-                return {
-                    'subject': f"{subject_time}{preferred_subject} — quick plan to make progress",
-                    'content': f"Hi {first_name}! Focus on a 20-minute review of {preferred_subject} now and a 10-question check right after. Short bursts beat cramming."
-                }
-
+                raw = resp.choices[0].message.content.strip()
+                try:
+                    result = json.loads(raw)
+                except Exception:
+                    # Try to recover JSON object from text
+                    import re
+                    m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+                    result = json.loads(m.group(0)) if m else {}
+                subject = (result.get("subject") or "").strip()
+                content = (result.get("content") or "").strip()
+                if not subject or not content:
+                    raise ValueError("LLM returned empty fields")
+                return {"subject": subject, "content": content}
         except Exception as e:
-            logger.error(f"Failed to generate educational email: {str(e)}")
-            first_name = user_email.split('@')[0].title()
-            subj = "Keep going — you’ve got this! 🎓"
-            body = f"Quick nudge: take a short review today and try 5 practice questions, {first_name}. Small steps compound fast."
-            return {'subject': subj, 'content': body}
+            logger.warning("LLM email generation failed in LLMService: %s", str(e))
 
+        # Fallback: deterministic copy guided by hints
+        subj_hint = preferred_subject or "your"
+        when = (day_hint or "soon")
+        if rule_id == "exam_last_minute_prep":
+            subject = f"{when.title()}’s {subj_hint} exam: 45-minute crash plan ✅"
+            content = (
+                f"Hello {first_name}!\n\n"
+                f"Your {subj_hint} exam is {when}. Here’s a focused, high-yield plan:\n\n"
+                "• 15 min — quick review of your most-missed ideas\n"
+                "• 15 min — 10 mixed practice Qs (no notes)\n"
+                "• 10 min — check answers & fix 2 weak patterns\n"
+                "• 5  min — one-page cheat sheet (from memory, then fill gaps)\n\n"
+                "Reply “START” and I’ll queue a 10-question mini-set now."
+            )
+        elif rule_id == "exam_post_checkin":
+            subject = f"How did the {subj_hint} exam go? 📚"
+            content = (
+                f"Hi {first_name}! How did it go? Jot one solid concept, one surprise, and one target for next week. "
+                "Reply “DEBRIEF” and I’ll prep a quick review set from your tricky areas."
+            )
+        else:
+            subject = f"Keep going, {first_name}! 🎓"
+            content = (
+                f"Hi {first_name}! Let’s lock in a quick 10-minute study block today. "
+                "Reply “GO” and I’ll send a focused set right away."
+            )
+
+        return {"subject": subject, "content": content}
     # --------- Other helpers (unchanged) ------------------------------------
 
     def _generate_embedding(self, text: str) -> List[float]:
