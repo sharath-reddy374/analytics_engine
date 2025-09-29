@@ -151,20 +151,78 @@ class FeatureEngine:
         return int(total_minutes)
     
     def _calculate_subject_affinity_from_events(self, events: List[Dict]) -> Dict[str, float]:
-        """Calculate subject affinity from events"""
-        subject_counts = {}
-        total_events = 0
+        """
+        Calculate subject affinity from events with comprehensive subject extraction
+        Similar to _calculate_subject_affinity but working with event dicts instead of DB
+        """
+        from datetime import datetime
         
+        subject_time: Dict[str, float] = {}
+        total_time = 0.0
+
+        def bump(subj: Optional[str], weight: float):
+            nonlocal total_time
+            if not subj:
+                return
+            s = subj.strip()
+            if not s:
+                return
+            subject_time[s] = subject_time.get(s, 0.0) + weight
+            total_time += weight
+
+        # Filter to relevant event types that may have subject information
+        relevant_events = [e for e in events if e['name'] in ['test_attempt', 'presentation_progress', 'convo_msg']]
+        
+        now = datetime.utcnow()
+        for event in relevant_events:
+            props = event.get('props', {}) or {}
+            
+            # Extract subject from multiple possible fields
+            subj = (
+                props.get('subject')
+                or props.get('Subject')  # Test attempts use capital S
+                or props.get('course_subject')
+                or props.get('course')
+            )
+            
+            # Derive from topic like "Biology>Cells"
+            if not subj:
+                topic = props.get('topic') or props.get('Topic')
+                if isinstance(topic, str) and '>' in topic:
+                    subj = topic.split('>')[0].strip()
+            
+            # Derive from conversation content or AI classification
+            if not subj:
+                subj = props.get('subject_tag')
+            
+            # Apply recency weight: up to ~30 days decay
+            try:
+                ts = datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
+                days_ago = (now - ts).days if isinstance(ts, datetime) else 0
+                weight = max(0.1, 1.0 - (days_ago / 30.0))
+            except:
+                weight = 0.5  # Default weight if timestamp parsing fails
+
+            bump(subj, weight)
+
+        # Also extract from top_topics if available (from conversation analysis)
+        # This is a fallback when direct subject extraction is sparse
         for event in events:
-            subject = event['props'].get('subject')
-            if subject:
-                subject_counts[subject] = subject_counts.get(subject, 0) + 1
-                total_events += 1
-        
-        if total_events == 0:
+            if event['name'] == 'convo_msg':
+                props = event.get('props', {}) or {}
+                # Look for AI-analyzed topics in conversation context
+                topics = props.get('topics', []) or []
+                for t in topics:
+                    # t could be "Biology>Cells" or a bare subject word
+                    subj = t.split('>')[0].strip() if isinstance(t, str) and '>' in t else t
+                    # lighter weight than explicit event-subject, but still counts
+                    bump(subj, 0.3)
+
+        if total_time <= 0:
             return {}
-        
-        return {subject: count / total_events for subject, count in subject_counts.items()}
+
+        # Normalize to probabilities
+        return {k: min(v / total_time, 1.0) for k, v in subject_time.items()}
     
     def compute_daily_features(self, db: Session, target_date: date = None) -> int:
         """
