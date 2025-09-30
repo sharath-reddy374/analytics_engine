@@ -64,7 +64,7 @@ def verify_existing_tables():
         'TestSereiesRecord_Prod',
         'LearningRecord_Prod',
         'Question_Prod',
-        'presentation_prod',
+        'Presentation_Prod',
         'ICP_Prod'
     ]
     

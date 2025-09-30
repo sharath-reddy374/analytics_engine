@@ -14,6 +14,7 @@ from services.decision_engine import DecisionEngine
 from services.email_template_service import EmailTemplateService
 from services.event_logger import EventLogger
 from database.connection import engine
+from config.settings import settings
 
 import logging
 import argparse
@@ -47,7 +48,9 @@ def process_single_user(email: str, skip_email: bool = False, send_email: bool =
         feature_engine = FeatureEngine()
         decision_engine = DecisionEngine()
         template_service = EmailTemplateService()
-        allow_send = send_email and not skip_email
+        allow_send = (send_email and not skip_email and not getattr(settings, "EMAIL_SIMULATION_MODE", True))
+        if send_email and getattr(settings, "EMAIL_SIMULATION_MODE", True):
+            logger.info("Email sending disabled: EMAIL_SIMULATION_MODE=True; no emails will be sent.")
         email_service = None
         if allow_send:
             try:
