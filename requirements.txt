@@ -67,3 +67,7 @@ python-dateutil==2.8.2
 pytz==2023.3
 pyyaml==6.0.1
 python-multipart==0.0.6
+
+# Database & ORM (for Supabase/Postgres)
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9

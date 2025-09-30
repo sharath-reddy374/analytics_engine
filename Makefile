@@ -64,3 +64,14 @@ setup-dev: install
 	@echo "Development environment ready!"
 	@echo "Run 'make test-connection' to verify DynamoDB access"
 	@echo "Run 'make dev' to start the server"
+
+# Supabase / Postgres helpers
+apply-sql:
+	@if [ -z "$(SCHEMA)" ]; then \
+		echo "Usage: make apply-sql SCHEMA=database/supabase_schema.sql"; \
+		exit 1; \
+	fi
+	python scripts/apply_sql.py $(SCHEMA)
+
+db-check:
+	@python -c "from database.connection import engine; import sys; print('DB engine OK' if engine is not None else 'DB engine disabled (set DATABASE_URL)'); sys.exit(0 if engine is not None else 1)"

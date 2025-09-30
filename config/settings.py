@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, AliasChoices
 from typing import List, Optional
 import os
 from dotenv import load_dotenv
@@ -54,9 +54,32 @@ class Settings(BaseSettings):
     FROM_EMAIL: str = "no-reply@edyou.com"
     FROM_NAME: str = "EdYou Team"
     EMAIL_SIMULATION_MODE: bool = True  # Added simulation mode for testing
+
+    # Supabase config (URL/key for REST; optional)
+    SUPABASE_URL: Optional[str] = Field(default=None, validation_alias=AliasChoices("SUPABASE_URL", "supabaseUrl"))
+    SUPABASE_ANON_KEY: Optional[str] = Field(default=None, validation_alias=AliasChoices("SUPABASE_ANON_KEY", "supabaseKey"))
+    # Supabase Postgres connection string (recommended to set one of these)
+    SUPABASE_DB_URL: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPABASE_DB_URL", "POSTGRES_URL", "SUPABASE_POSTGRES_URL")
+    )
+
+    # App/Web URLs for CTAs in emails (used to avoid "reply" instructions)
+    APP_BASE_URL: str = "https://app.edyou.com"
+    CTA_DEBRIEF_PATH: str = "/debrief"
+    CTA_MINI_QUIZ_PATH: str = "/quiz/mini"
+    CTA_RESUME_COURSE_PATH: str = "/user/course"
+    CTA_RESUME_TEST_PATH: str = "/resume/test"
+    CTA_OPEN_DASHBOARD_PATH: str = "/dashboard"
     
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+
+    # Optional SQL database URL for ORM features; leave None to disable
+    DATABASE_URL: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("DATABASE_URL", "SUPABASE_DB_URL", "POSTGRES_URL", "SUPABASE_POSTGRES_URL")
+    )
     
     # App Settings
     DEBUG: bool = True
@@ -68,6 +91,13 @@ class Settings(BaseSettings):
     MAX_EMAILS_PER_WEEK: int = 2
     EMAIL_QUIET_HOURS_START: int = 20  # 8 PM
     EMAIL_QUIET_HOURS_END: int = 8     # 8 AM
+
+    # ITP/ICP analyzer thresholds
+    ITP_STALLED_DAYS: int = 7
+    ICP_STALLED_DAYS: int = 14
+    WEAK_TOPIC_MIN_ATTEMPTS: int = 5
+    WEAK_TOPIC_MAX_ACCURACY: float = 0.60
+    MAX_WEAK_TOPICS: int = 3
 
     model_config = ConfigDict(
         env_file=".env",

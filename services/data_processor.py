@@ -280,6 +280,37 @@ class DataProcessor:
         
         return all_events
     
+    async def process_user_pipeline(self, user_email: str) -> Dict[str, Any]:
+        """
+        Orchestrate end-to-end processing for a single user without sending emails.
+        Returns counts, features, and decisions for inspection (DRY RUN).
+        """
+        from services.feature_engine import FeatureEngine
+        from services.decision_engine import DecisionEngine
+
+        user_data = self.data_fetcher.get_all_user_data(user_email)
+        if not user_data:
+            return {
+                "events_processed": 0,
+                "features_computed": False,
+                "email_campaigns": [],
+                "message": f"User {user_email} not found"
+            }
+
+        events = self.process_all_user_data(user_email)
+        feat_engine = FeatureEngine()
+        features = feat_engine.compute_user_features(user_email, events)
+
+        dec_engine = DecisionEngine()
+        decisions = dec_engine.evaluate_user(user_email, features)
+
+        return {
+            "events_processed": len(events),
+            "features_computed": True,
+            "email_campaigns": decisions,
+            "features": features
+        }
+    
     def process_icp_data(self, icp_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         events = []
         print(f"🎓 Processing {len(icp_data)} ICP course records...")

@@ -1,5 +1,8 @@
 # services/llm_service.py
-import openai
+try:
+    import openai  # type: ignore
+except Exception:
+    openai = None  # type: ignore
 from typing import Dict, List, Any, Optional
 import logging
 import json
@@ -36,8 +39,11 @@ class LLMService:
 
     def __init__(self):
         self.client = None
-        if getattr(settings, "OPENAI_API_KEY", None):
-            self.client = openai.Client(api_key=settings.OPENAI_API_KEY)
+        if getattr(settings, "OPENAI_API_KEY", None) and openai is not None:
+            try:
+                self.client = openai.Client(api_key=settings.OPENAI_API_KEY)
+            except Exception:
+                self.client = None
 
         # Embedding model (optional)
         try:
@@ -231,6 +237,7 @@ Requirements:
 - {metrics_rules}
 - Avoid making up facts, scores, dates, or links.
 - Tone: encouraging, academic coach, concise.
+- Do not ask the reader to reply or respond; emails are sent from a no-reply address. Avoid the words "reply", "respond", "email back".
 
 Style nudges (use if they fit):
 - Subject should be short and actionable.
@@ -285,19 +292,19 @@ Now produce JSON:
                 "• 15 min — 10 mixed practice Qs (no notes)\n"
                 "• 10 min — check answers & fix 2 weak patterns\n"
                 "• 5  min — one-page cheat sheet (from memory, then fill gaps)\n\n"
-                "Reply “START” and I’ll queue a 10-question mini-set now."
+                "Start a 10-question mini-set now."
             )
         elif rule_id == "exam_post_checkin":
             subject = f"How did the {subj_hint} exam go? 📚"
             content = (
                 f"Hi {first_name}! How did it go? Jot one solid concept, one surprise, and one target for next week. "
-                "Reply “DEBRIEF” and I’ll prep a quick review set from your tricky areas."
+                "Start a quick debrief quiz from your tricky areas."
             )
         else:
             subject = f"Keep going, {first_name}! 🎓"
             content = (
                 f"Hi {first_name}! Let’s lock in a quick 10-minute study block today. "
-                "Reply “GO” and I’ll send a focused set right away."
+                "Start a focused set now."
             )
 
         return {"subject": subject, "content": content}

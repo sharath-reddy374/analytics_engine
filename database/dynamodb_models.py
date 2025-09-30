@@ -5,8 +5,11 @@ import uuid
 import logging
 from database.dynamodb_connection import get_dynamodb
 from config.settings import get_settings
+from boto3.dynamodb.conditions import Key, Attr
 
 logger = logging.getLogger(__name__)
+# Track which tables have had their schema logged to avoid duplicate logs
+_SCHEMA_LOGGED_TABLES: set = set()
 
 class DynamoDBModel:
     """Base class for DynamoDB models with proper GetItem/Query operations"""
@@ -19,6 +22,9 @@ class DynamoDBModel:
     
     def _log_table_schema(self):
         """Log table schema including primary key and GSIs"""
+        # Log schema only once per table to avoid duplicate startup logs
+        if self.table_name in _SCHEMA_LOGGED_TABLES:
+            return
         try:
             table_description = self.table.meta.client.describe_table(TableName=self.table_name)
             table_info = table_description['Table']
@@ -37,6 +43,9 @@ class DynamoDBModel:
                     logger.info(f"🔍 Table {self.table_name} - GSI '{gsi_name}': {gsi_keys}")
             else:
                 logger.info(f"❌ Table {self.table_name} - No GSIs found")
+            
+            # Mark this table as logged to prevent duplicate schema logs
+            _SCHEMA_LOGGED_TABLES.add(self.table_name)
                 
         except Exception as e:
             logger.warning(f"⚠️ Could not describe table {self.table_name}: {e}")
@@ -54,31 +63,24 @@ class DynamoDBModel:
             logger.error(f"GetItem failed for {self.table_name}: {e}")
             return None
     
-    def query_by_partition_key(self, partition_key: str, partition_value: Any, 
+    def query_by_partition_key(self, partition_key: str, partition_value: Any,
                               sort_key: Optional[str] = None, sort_value: Optional[Any] = None,
                               scan_forward: bool = True, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Query items using partition key and optional sort key"""
+        """Query items using partition key and optional sort key using boto3 Key() expressions."""
         try:
-            # Build key condition
-            if sort_key and sort_value is not None:
-                key_condition = f"{partition_key} = :pk AND {sort_key} = :sk"
-                expression_values = {':pk': partition_value, ':sk': sort_value}
-            else:
-                key_condition = f"{partition_key} = :pk"
-                expression_values = {':pk': partition_value}
-            
+            key_expr = Key(partition_key).eq(partition_value)
+            if sort_key is not None and sort_value is not None:
+                key_expr = key_expr & Key(sort_key).eq(sort_value)
+
             query_kwargs = {
-                'KeyConditionExpression': key_condition,
-                'ExpressionAttributeValues': expression_values,
+                'KeyConditionExpression': key_expr,
                 'ScanIndexForward': scan_forward
             }
-            
             if limit:
-                query_kwargs['Limit'] = limit
-            
+                query_kwargs['Limit'] = int(limit)
+
             response = self.table.query(**query_kwargs)
             return response.get('Items', [])
-            
         except Exception as e:
             logger.error(f"Query failed for {self.table_name}: {e}")
             return []
@@ -254,21 +256,20 @@ class QuestionProdModel(DynamoDBModel):
         """Get questions for a specific subject with pagination"""
         all_items = []
         scan_kwargs = {
-            'FilterExpression': 'contains(Subject, :subject)',
-            'ExpressionAttributeValues': {':subject': subject}
+            'FilterExpression': Attr('Subject').contains(subject)
         }
-        
+
         while True:
             response = self.table.scan(**scan_kwargs)
             items = response.get('Items', [])
             all_items.extend(items)
-            
+
             last_key = response.get('LastEvaluatedKey')
             if not last_key:
                 break
-                
+
             scan_kwargs['ExclusiveStartKey'] = last_key
-        
+
         return all_items
 
 class PresentationProdModel(DynamoDBModel):
@@ -283,26 +284,22 @@ class PresentationProdModel(DynamoDBModel):
     
     def get_presentation_by_id(self, presentation_id: str) -> Optional[Dict[str, Any]]:
         """Get presentation by ID with pagination"""
-        all_items = []
         scan_kwargs = {
-            'FilterExpression': 'id = :id',
-            'ExpressionAttributeValues': {':id': presentation_id}
+            'FilterExpression': Attr('id').eq(presentation_id)
         }
-        
+
         while True:
             response = self.table.scan(**scan_kwargs)
             items = response.get('Items', [])
-            all_items.extend(items)
-            
-            if all_items:  # Return first match
-                return all_items[0]
-            
+            if items:
+                return items[0]
+
             last_key = response.get('LastEvaluatedKey')
             if not last_key:
                 break
-                
+
             scan_kwargs['ExclusiveStartKey'] = last_key
-        
+
         return None
 
 class UserAnalytics:

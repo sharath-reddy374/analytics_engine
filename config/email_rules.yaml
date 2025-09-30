@@ -48,7 +48,7 @@ rules:
       cooldown_days: 2
 
 
-  - id: exam_last_minute_prep
+  - id: exam_last_minute_prep_detected
     description: "Pre-exam nudge when an exam is imminent (detected from AI triggers)"
     when:
       all:
@@ -61,7 +61,7 @@ rules:
       priority: 100
       cooldown_days: 2
 
-  - id: exam_post_checkin
+  - id: exam_post_checkin_detected
     description: "Post-exam check-in (detected from AI triggers)"
     when:
       all:
@@ -195,3 +195,31 @@ rules:
       template_id: "winback_study_plan_v1"
       priority: 60
       cooldown_days: 7
+
+  # --- RESUME (stalled ICP/ITP) ---
+
+  - id: resume_icp
+    description: "Resume stalled ICP course when no higher-priority triggers fire"
+    when:
+      all:
+        - eq:  { field: "resume_target", value: "icp" }
+        - eq:  { field: "stalled_icp_recent", value: true }
+        - lt:  { field: "emails_sent_7d", value: 2 }
+        - eq:  { field: "unsubscribed", value: false }
+    action:
+      template_id: "resume_icp_v1"
+      priority: 72
+      cooldown_days: 3
+
+  - id: resume_itp
+    description: "Resume stalled ITP test when no higher-priority triggers fire"
+    when:
+      all:
+        - eq:  { field: "resume_target", value: "itp" }
+        - eq:  { field: "stalled_itp_recent", value: true }
+        - lt:  { field: "emails_sent_7d", value: 2 }
+        - eq:  { field: "unsubscribed", value: false }
+    action:
+      template_id: "resume_itp_v1"
+      priority: 71
+      cooldown_days: 3

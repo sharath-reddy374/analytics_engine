@@ -5,6 +5,8 @@ from datetime import datetime
 import asyncio
 import re
 from services.llm_service import LLMService
+from config.settings import settings
+from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,9 @@ class EmailTemplateService:
         # --- Performance / winback
         "test_improvement_v1": "test_performance_help",
         "winback_study_plan_v1": "winback_idle",
+        # --- Resume nudges
+        "resume_icp_v1": "resume_icp",
+        "resume_itp_v1": "resume_itp",
     }
 
     def __init__(self):
@@ -115,6 +120,71 @@ class EmailTemplateService:
             # for now we assume you DON'T have per-subject metrics, so set False)
             SUBJECT_METRICS_AVAILABLE = False
 
+            # --- No-reply email helpers ---------------------------------------
+            def _strip_reply_ctas(text: str) -> str:
+                """
+                Remove sentences that tell the user to reply/respond to the email.
+                We send from a no-reply address, so remove those instructions.
+                """
+                if not text:
+                    return text
+                sents = _sentence_split(text)
+                blocked = ['reply', 'respond', 'email back', 'write back', 'hit reply']
+                cleaned: List[str] = []
+                for s in sents:
+                    sl = (s or '').lower()
+                    if any(b in sl for b in blocked):
+                        continue
+                    cleaned.append(s)
+                return _join_sentences(cleaned)
+
+            def _build_url(path: str, params: Optional[Dict[str, Any]] = None) -> str:
+                base = (settings.APP_BASE_URL or '').rstrip('/')
+                url = f"{base}/{(path or '').lstrip('/')}"
+                if params:
+                    try:
+                        qs = urlencode(params, doseq=True)
+                        if qs:
+                            url = f"{url}?{qs}"
+                    except Exception:
+                        pass
+                return url
+
+            def _append_cta_footer(ctx: Dict[str, Any], body: str) -> str:
+                purpose = ctx.get('email_purpose')
+                subject_area = ctx.get('subject_area') or 'your studies'
+                det = ctx.get('resume_details') or {}
+                title = det.get('title') or subject_area
+
+                cta_label = None
+                cta_url = None
+
+                if purpose == 'exam_followup':
+                    cta_label = "Start Debrief"
+                    cta_url = _build_url(settings.CTA_DEBRIEF_PATH, {"subject": subject_area})
+                elif purpose == 'exam_last_minute_prep':
+                    cta_label = "Start 10-question Mini-Quiz"
+                    cta_url = _build_url(settings.CTA_MINI_QUIZ_PATH, {"subject": subject_area})
+                elif purpose == 'resume_icp':
+                    cta_label = "Resume Course"
+                    cta_url = _build_url(settings.CTA_RESUME_COURSE_PATH, {"title": title})
+                elif purpose == 'resume_itp':
+                    cta_label = "Resume Test"
+                    cta_url = _build_url(settings.CTA_RESUME_TEST_PATH, {"title": title})
+                elif purpose == 'appointment_followup':
+                    cta_label = "Capture Notes"
+                    cta_url = _build_url(settings.CTA_OPEN_DASHBOARD_PATH)
+                elif purpose == 'learning_support':
+                    cta_label = "Pick a Topic"
+                    cta_url = _build_url(settings.CTA_OPEN_DASHBOARD_PATH)
+                else:
+                    cta_label = "Open App"
+                    cta_url = _build_url(settings.CTA_OPEN_DASHBOARD_PATH)
+
+                if cta_label and cta_url:
+                    return f"{body}\n\n➡️ {cta_label}: {cta_url}"
+                return body
+
             # --- Resolve mapping & context --------------------------------------
             rule_id = self._template_to_rule(template_id)
             user_email = features.get('email', 'student@example.com')
@@ -171,20 +241,28 @@ class EmailTemplateService:
                     # Remove the % number fragments in subject (simple scrub)
                     llm_subject = re.sub(r"\b\d{1,3}\s?%\b", "", llm_subject).replace("  ", " ").strip(" -,:;")
 
+                # --- Remove reply CTAs and append proper link-based CTA --------
+                llm_body_final = _append_cta_footer(
+                    email_context,
+                    _strip_reply_ctas(llm_body_sanitized)
+                )
+
                 # --- Final alignment check --------------------------------------
-                if not self._is_alignment_ok(purpose, llm_subject, llm_body_sanitized, email_context):
+                if not self._is_alignment_ok(purpose, llm_subject, llm_body_final, email_context):
                     logger.debug(
                         "LLM output misaligned with purpose '%s' — using fallback. "
                         "(rule_id=%s, template_id=%s, subject='%s')",
                         purpose, rule_id, template_id, llm_subject
                     )
-                    subject, content = fallback_subject, fallback_body
+                    subject = fallback_subject
+                    content = _append_cta_footer(email_context, _strip_reply_ctas(fallback_body))
                 else:
-                    subject, content = llm_subject, llm_body_sanitized
+                    subject, content = llm_subject, llm_body_final
 
             except Exception as e:
                 logger.warning("OpenAI generation failed, using fallback: %s", str(e))
-                subject, content = fallback_subject, fallback_body
+                subject = fallback_subject
+                content = _append_cta_footer(email_context, _strip_reply_ctas(fallback_body))
 
             return {
                 'subject': (subject or "").strip(),
@@ -281,6 +359,8 @@ class EmailTemplateService:
             'subject_area': subject_area,
             'day_hint': day_hint,              # <- "tonight" | "today" | "tomorrow" | "soon"
             'chosen_trigger': chosen_trigger,  # <- the trigger we prioritized (if any)
+            'resume_target': features.get('resume_target'),
+            'resume_details': features.get('resume_details', {}),
         }
         return context
 
@@ -291,6 +371,11 @@ class EmailTemplateService:
         ai_triggers: Optional[List[Dict[str, Any]]]
     ) -> str:
         """Determine the main purpose of the email from triggers/state."""
+        # Explicitly honor resume templates if selected by rules
+        rid = self._template_to_rule(template_id)
+        if rid in ("resume_icp", "resume_itp"):
+            return rid
+
         recency = features.get('recency_days', 0)
         engagement = self._assess_engagement_level(features)
 
@@ -371,7 +456,7 @@ Your {subject_area} exam is {(day_hint or 'soon')}. Here’s a focused, high-yie
 • Close-book first pass, open-book second pass  
 • If a question takes >90s, mark & move — keep momentum
 
-Reply “START” and I’ll send a 10-question mini-quiz tailored to {subject_area} now. Good luck — you’ve got this!"""
+Start a 10‑question mini-quiz now: {settings.APP_BASE_URL.rstrip('/')}{settings.CTA_MINI_QUIZ_PATH}?{urlencode({'subject': subject_area})} Good luck — you’ve got this!"""
             return subject, body
 
         if purpose == 'exam_followup':
@@ -385,7 +470,7 @@ How did your {subject_area} exam go? A 3-minute reflection now will boost retent
 • One that surprised you  
 • One you want to master next week
 
-Want a quick debrief quiz from your tricky areas? Reply “DEBRIEF” and I’ll tailor it."""
+Want a quick debrief quiz from your tricky areas? Start Debrief: {settings.APP_BASE_URL.rstrip('/')}{settings.CTA_DEBRIEF_PATH}?{urlencode({'subject': subject_area})}"""
             return subject, body
 
         if purpose == 'appointment_reminder':
@@ -414,7 +499,45 @@ Hope your session went well. Capture value while it’s fresh:
 • Any action items + deadlines  
 • What needs clarification?
 
-Reply with your notes — I’ll turn them into a simple plan."""
+Capture your notes here: {settings.APP_BASE_URL.rstrip('/')}{settings.CTA_OPEN_DASHBOARD_PATH}"""
+            return subject, body
+
+        if purpose == 'resume_icp':
+            det = ctx.get('resume_details') or {}
+            title = det.get('title') or subject_area
+            days = det.get('days_since_last_activity', None)
+            when = f"{days} days ago" if isinstance(days, int) else "a while ago"
+            subject = f"Pick up your course: {title} — quick 15‑min restart"
+            body = f"""{greet}
+
+It looks like your course “{title}” paused {when}. Let’s make a small restart:
+
+🔁 **Quick restart**
+• 10 min — skim last completed section  
+• 5  min — do 3 practice Qs  
+• Then continue to the next section
+
+Resume course: {settings.APP_BASE_URL.rstrip('/')}{settings.CTA_RESUME_COURSE_PATH}?{urlencode({'title': title})}"""
+            return subject, body
+
+        if purpose == 'resume_itp':
+            det = ctx.get('resume_details') or {}
+            title = det.get('title') or subject_area
+            cur = det.get('current_position', 0)
+            total = det.get('total_questions', 0)
+            days = det.get('days_since_last_activity', None)
+            when = f"{days} days ago" if isinstance(days, int) else "a while ago"
+            subject = f"Resume your test: {title} — {cur}/{total} done"
+            body = f"""{greet}
+
+You left this test {when}. Try a 5‑question warmup, then continue:
+
+🎯 **Plan**
+• 5 quick Qs to warm up  
+• Mark anything over 90s  
+• Finish the remaining set
+
+Resume test: {settings.APP_BASE_URL.rstrip('/')}{settings.CTA_RESUME_TEST_PATH}?{urlencode({'title': title})}"""
             return subject, body
 
         if purpose == 'completion_celebration':
@@ -452,14 +575,14 @@ Keep going — momentum is your superpower!"""
             body = f"""{greet}
 
 I saw you’ve been digging into {subject_area}. Want a targeted explainer + practice set?
-Reply with a topic (e.g., “cell membrane transport”) and I’ll tailor it."""
+Pick a topic here: {settings.APP_BASE_URL.rstrip('/')}{settings.CTA_OPEN_DASHBOARD_PATH}"""
             return subject, body
 
         if purpose == 'winback':
             subject = f"Ready to continue your {subject_area} journey? 🎯"
             body = f"""{greet}
 
-Let’s ease back in: 10 minutes, one concept, one quick win. I’ll line it up — just say “GO”."""
+Let’s ease back in: 10 minutes, one concept, one quick win. Open the app to continue: {settings.APP_BASE_URL.rstrip('/')}{settings.CTA_OPEN_DASHBOARD_PATH}"""
             return subject, body
 
         if purpose == 'performance_praise':
@@ -473,7 +596,7 @@ You’re crushing {subject_area}. Want an advanced challenge set to push further
         subject = f"Your {subject_area} learning continues! 💪"
         body = f"""{greet}
 
-Small, consistent steps compound. I can queue a 10-minute set right now — just say “START”."""
+Small, consistent steps compound. Start a 10-minute set now: {settings.APP_BASE_URL.rstrip('/')}{settings.CTA_MINI_QUIZ_PATH}?{urlencode({'subject': subject_area})}"""
         return subject, body
 
     # ---- Alignment guard ----------------------------------------------------

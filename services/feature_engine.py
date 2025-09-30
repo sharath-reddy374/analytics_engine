@@ -6,6 +6,7 @@ from typing import Dict, Any, List
 import logging
 from typing import Optional, List, Any
 import typing as t
+from services.itp_icp_analyzer import ItpIcpAnalyzer
 
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,8 @@ class FeatureEngine:
     def __init__(self):
         from services.llm_service import LLMService
         self.llm_service = LLMService()
+        from services.itp_icp_analyzer import ItpIcpAnalyzer
+        self.itp_icp = ItpIcpAnalyzer()
     
     def compute_user_features(self, email: str, events: List[Dict]) -> Dict[str, Any]:
         """
@@ -92,6 +95,14 @@ class FeatureEngine:
             'emails_sent_7d': 0,
             'unsubscribed': False
         })
+
+        # Merge ITP/ICP analyzer outputs (weak topics, stalled resume, ICP payloads)
+        try:
+            analysis = self.itp_icp.analyze_user(email)
+            if isinstance(analysis, dict):
+                features.update(analysis)
+        except Exception as e:
+            logger.error(f"ITP/ICP analyzer failed for {email}: {e}")
         
         return features
     
@@ -355,7 +366,7 @@ class FeatureEngine:
             ) for t in trigs
         )
         
-        return {
+        features_db = {
             'recency_days': recency_days,
             'frequency_7d': frequency_7d,
             'minutes_7d': minutes_7d,
@@ -374,6 +385,14 @@ class FeatureEngine:
             'has_exam_post_checkin': has_exam_post_checkin,
             'has_learning_support': has_learning_support,
         }
+        # Merge ITP/ICP analyzer outputs for ORM path as well
+        try:
+            analysis = self.itp_icp.analyze_user(user_id)
+            if isinstance(analysis, dict):
+                features_db.update(analysis)
+        except Exception as e:
+            logger.error(f"ITP/ICP analyzer failed (ORM path) for {user_id}: {e}")
+        return features_db
     
     def _calculate_login_minutes(self, login_events: List[Any], convo_events_recent: Optional[List[Any]] = None) -> int:
         """

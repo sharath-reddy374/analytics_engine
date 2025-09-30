@@ -429,12 +429,21 @@ class DecisionEngine:
                         return pattern in field_value
                 return False
             elif operator == 'contains_trigger':
-                # supports {"trigger_type": "post_exam"} etc.
-                if isinstance(field_value, list) and isinstance(trigger_type, str):
-                    return any(
-                        isinstance(t, dict) and (t.get('trigger') == trigger_type or t.get('trigger_type') == trigger_type)
-                        for t in field_value
-                    )
+                # supports {"trigger": "post_exam"} and/or {"trigger_type": "post_exam"} and/or {"message_type": "..."}
+                if isinstance(field_value, list):
+                    trigger_key = params.get('trigger') or params.get('trigger_type')
+                    msg_type_param = params.get('message_type')
+                    for t in field_value:
+                        if not isinstance(t, dict):
+                            continue
+                        trig_ok = True
+                        msg_ok = True
+                        if trigger_key:
+                            trig_ok = (t.get('trigger') == trigger_key or t.get('trigger_type') == trigger_key)
+                        if msg_type_param:
+                            msg_ok = (t.get('message_type') == msg_type_param)
+                        if trig_ok and msg_ok:
+                            return True
                 return False
 
         return False
@@ -485,11 +494,21 @@ class DecisionEngine:
                         return pattern in field_value
                 return False
             elif operator == 'contains_trigger':
+                # supports {"trigger": "..."} and/or {"trigger_type": "..."} and/or {"message_type": "..."}
                 if isinstance(field_value, list):
-                    return any(
-                        isinstance(trigger, dict) and trigger.get('trigger') == trigger_type
-                        for trigger in field_value
-                    )
+                    trig_param = params.get('trigger') or params.get('trigger_type')
+                    msg_type_param = params.get('message_type')
+                    for trigger in field_value:
+                        if not isinstance(trigger, dict):
+                            continue
+                        trig_ok = True
+                        msg_ok = True
+                        if trig_param:
+                            trig_ok = (trigger.get('trigger') == trig_param or trigger.get('trigger_type') == trig_param)
+                        if msg_type_param:
+                            msg_ok = (trigger.get('message_type') == msg_type_param)
+                        if trig_ok and msg_ok:
+                            return True
                 return False
         
         return False

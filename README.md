@@ -20,12 +20,12 @@ The system follows a cloud-agnostic pipeline: **Ingest → Normalize → Underst
 
 ## Quick Start
 
-### 1. Start Services
+### 1. Install dependencies
 \`\`\`bash
-# Start all infrastructure services
-make docker-up
+# Install all dependencies
+make install
 
-# Wait 30 seconds for services to initialize, then seed sample data
+# Then seed sample data (optional)
 make seed-data
 \`\`\`
 
@@ -34,8 +34,6 @@ make seed-data
 # Start the FastAPI application
 make dev
 
-# Or run with Docker
-docker-compose up edyou-engine
 \`\`\`
 
 ### 3. Test the API
@@ -184,8 +182,6 @@ alembic upgrade head
 
 ### Production Deployment
 \`\`\`bash
-# Build and deploy with Docker
-docker-compose -f docker-compose.prod.yml up -d
 
 # Or deploy to Kubernetes
 kubectl apply -f k8s/
@@ -221,5 +217,7 @@ kubectl apply -f k8s/
 
 ### Compliance
 - **FERPA/COPPA**: K-12 education compliance ready
+- **GDPR**: Right to deletion and data portability
+- **CAN-SPAM**: Compliant email practices with unsubscribe- **FERPA/COPPA**: K-12 education compliance ready
 - **GDPR**: Right to deletion and data portability
 - **CAN-SPAM**: Compliant email practices with unsubscribe
