@@ -590,6 +590,232 @@ async def admin_get_users(tenantName: Optional[str] = None, q: Optional[str] = N
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ===================
+# Aggregated Metrics
+# ===================
+
+@app.get("/admin/metrics")
+async def admin_metrics(days: int = 7, tenantName: Optional[str] = None):
+    """
+    Aggregated KPIs and time-series for dashboard.
+    - days: rolling window for series and 7d KPIs (default 7)
+    - tenantName: optional tenant filter (matches users.metadata->>'tenantName')
+    """
+    try:
+        # Normalize params
+        if days <= 0:
+            days = 7
+        tenant = tenantName
+
+        # Helper to ensure params for each query
+        def p(extra: Dict[str, Any] = {}):
+            base = {"days": days, "tenant": tenant}
+            base.update(extra)
+            return base
+
+        # KPIs
+        total_users_row = pg.fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM public.users u
+            WHERE (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+        active_users_7d_row = pg.fetch_one(
+            """
+            SELECT COUNT(DISTINCT r.user_id) AS c
+            FROM public.runs r
+            JOIN public.users u ON u.id = r.user_id
+            WHERE r.started_at >= now() - make_interval(days => :days)
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+
+        runs_24h_row = pg.fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM public.runs r
+            JOIN public.users u ON u.id = r.user_id
+            WHERE r.started_at >= now() - interval '24 hours'
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+        runs_7d_row = pg.fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM public.runs r
+            JOIN public.users u ON u.id = r.user_id
+            WHERE r.started_at >= now() - make_interval(days => :days)
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+
+        events_24h_row = pg.fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM public.events e
+            JOIN public.users u ON u.id = e.user_id
+            WHERE e.occurred_at >= now() - interval '24 hours'
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+        events_7d_row = pg.fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM public.events e
+            JOIN public.users u ON u.id = e.user_id
+            WHERE e.occurred_at >= now() - make_interval(days => :days)
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+
+        decisions_24h_row = pg.fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM public.decisions d
+            JOIN public.users u ON u.id = d.user_id
+            WHERE d.decided_at >= now() - interval '24 hours'
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+        decisions_7d_row = pg.fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM public.decisions d
+            JOIN public.users u ON u.id = d.user_id
+            WHERE d.decided_at >= now() - make_interval(days => :days)
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+
+        attempts_queued_24h_row = pg.fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM public.email_attempts a
+            JOIN public.users u ON u.id = a.user_id
+            WHERE a.created_at >= now() - interval '24 hours'
+              AND a.status = 'queued'
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+        attempts_queued_7d_row = pg.fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM public.email_attempts a
+            JOIN public.users u ON u.id = a.user_id
+            WHERE a.created_at >= now() - make_interval(days => :days)
+              AND a.status = 'queued'
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            """,
+            p(),
+        )
+
+        # Time-series (daily)
+        runs_by_day = pg.fetch_all(
+            """
+            SELECT date_trunc('day', r.started_at)::date AS day, COUNT(*) AS c
+            FROM public.runs r
+            JOIN public.users u ON u.id = r.user_id
+            WHERE r.started_at >= now() - make_interval(days => :days)
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            GROUP BY day
+            ORDER BY day
+            """,
+            p(),
+        )
+        events_by_day = pg.fetch_all(
+            """
+            SELECT date_trunc('day', e.occurred_at)::date AS day, COUNT(*) AS c
+            FROM public.events e
+            JOIN public.users u ON u.id = e.user_id
+            WHERE e.occurred_at >= now() - make_interval(days => :days)
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            GROUP BY day
+            ORDER BY day
+            """,
+            p(),
+        )
+        decisions_by_day = pg.fetch_all(
+            """
+            SELECT date_trunc('day', d.decided_at)::date AS day, COUNT(*) AS c
+            FROM public.decisions d
+            JOIN public.users u ON u.id = d.user_id
+            WHERE d.decided_at >= now() - make_interval(days => :days)
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            GROUP BY day
+            ORDER BY day
+            """,
+            p(),
+        )
+
+        # Distributions
+        decisions_by_rule = pg.fetch_all(
+            """
+            SELECT d.rule, COUNT(*) AS c
+            FROM public.decisions d
+            JOIN public.users u ON u.id = d.user_id
+            WHERE d.decided_at >= now() - make_interval(days => :days)
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            GROUP BY d.rule
+            ORDER BY c DESC
+            LIMIT 10
+            """,
+            p(),
+        )
+        attempts_by_template_status = pg.fetch_all(
+            """
+            SELECT a.template_key, a.status, COUNT(*) AS c
+            FROM public.email_attempts a
+            JOIN public.users u ON u.id = a.user_id
+            WHERE a.created_at >= now() - make_interval(days => :days)
+              AND (:tenant IS NULL OR (u.metadata->>'tenantName') ILIKE :tenant)
+            GROUP BY a.template_key, a.status
+            ORDER BY c DESC
+            LIMIT 20
+            """,
+            p(),
+        )
+
+        return {
+            "kpis": {
+                "total_users": (total_users_row or {}).get("c", 0),
+                "active_users_7d": (active_users_7d_row or {}).get("c", 0),
+                "runs_24h": (runs_24h_row or {}).get("c", 0),
+                "runs_7d": (runs_7d_row or {}).get("c", 0),
+                "events_24h": (events_24h_row or {}).get("c", 0),
+                "events_7d": (events_7d_row or {}).get("c", 0),
+                "decisions_24h": (decisions_24h_row or {}).get("c", 0),
+                "decisions_7d": (decisions_7d_row or {}).get("c", 0),
+                "queued_attempts_24h": (attempts_queued_24h_row or {}).get("c", 0),
+                "queued_attempts_7d": (attempts_queued_7d_row or {}).get("c", 0),
+            },
+            "series": {
+                "runs_by_day": runs_by_day,
+                "events_by_day": events_by_day,
+                "decisions_by_day": decisions_by_day,
+            },
+            "distributions": {
+                "decisions_by_rule": decisions_by_rule,
+                "attempts_by_template_status": attempts_by_template_status,
+            },
+            "filters": {"days": days, "tenantName": tenant},
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("admin_metrics failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -221,3 +221,9 @@ kubectl apply -f k8s/
 - **CAN-SPAM**: Compliant email practices with unsubscribe- **FERPA/COPPA**: K-12 education compliance ready
 - **GDPR**: Right to deletion and data portability
 - **CAN-SPAM**: Compliant email practices with unsubscribe
+
+
+
+
+<!-- python -m uvicorn api.main:app --host 127.0.0.1 --port 8001 --reload
+ -->

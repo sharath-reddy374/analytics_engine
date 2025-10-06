@@ -4,11 +4,12 @@ import { fetchUserOverview, type UserOverviewResponse, formatDate } from "@/lib/
 export const revalidate = 0;
 
 type PageProps = {
-  params: { email: string };
+  params: Promise<{ email: string }>;
 };
 
 export default async function UserOverviewPage({ params }: PageProps) {
-  const email = decodeURIComponent(params.email);
+  const p = await params;
+  const email = decodeURIComponent(p.email);
   const data: UserOverviewResponse = await fetchUserOverview(email);
 
   const { user, runs, latest_run, latest_run_events, latest_run_decisions, latest_run_email_attempts, latest_run_features } =

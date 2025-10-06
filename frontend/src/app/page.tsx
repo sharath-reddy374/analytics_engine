@@ -13,6 +13,20 @@ export default function Home() {
       <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 12 }}>
         <li>
           <Link
+            href="/dashboard"
+            style={{
+              display: "inline-block",
+              padding: "10px 12px",
+              border: "1px solid #ccc",
+              borderRadius: 8,
+              background: "#f7f7f7",
+            }}
+          >
+            Open Analytics Dashboard →
+          </Link>
+        </li>
+        <li>
+          <Link
             href="/tenants"
             style={{
               display: "inline-block",
