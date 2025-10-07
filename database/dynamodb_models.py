@@ -146,6 +146,59 @@ class InvestorProdModel(DynamoDBModel):
         
         return matching_users
 
+    def get_users_by_tenant(
+        self,
+        tenant_name: str,
+        limit: int = 100,
+        next_token: Optional[Dict[str, Any]] = None,
+        email_prefix: Optional[str] = None,
+        projection: Optional[List[str]] = None,
+        scan_forward: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Query users by tenant using the GSI 'tenantName-email-index'.
+        - tenant_name: tenant partition (exact match)
+        - limit: page size
+        - next_token: ExclusiveStartKey from previous query (pagination)
+        - email_prefix: optional begins_with() on email sort key for prefix search
+        - projection: list of attributes to return (to keep payload small)
+        - returns: {'items': [...], 'next_token': {...} or None}
+        """
+        try:
+            query_kwargs: Dict[str, Any] = {
+                'IndexName': 'tenantName-email-index',
+                'KeyConditionExpression': Key('tenantName').eq(tenant_name),
+                'ScanIndexForward': scan_forward,
+                'Limit': int(limit)
+            }
+
+            if email_prefix:
+                # begins_with only applies to the sort key (email)
+                query_kwargs['KeyConditionExpression'] = query_kwargs['KeyConditionExpression'] & Key('email').begins_with(email_prefix)
+
+            if projection:
+                # De-duplicate fields and build a safe ProjectionExpression
+                uniq: List[str] = []
+                for field in projection:
+                    if field and field not in uniq:
+                        uniq.append(field)
+                if uniq:
+                    names = {f"#{field.replace('.', '_')}_{i}": field for i, field in enumerate(uniq)}
+                    query_kwargs['ExpressionAttributeNames'] = names
+                    query_kwargs['ProjectionExpression'] = ", ".join(names.keys())
+
+            if next_token:
+                query_kwargs['ExclusiveStartKey'] = next_token
+
+            resp = self.table.query(**query_kwargs)
+            return {
+                'items': resp.get('Items', []),
+                'next_token': resp.get('LastEvaluatedKey')
+            }
+        except Exception as e:
+            logger.error(f"Query get_users_by_tenant failed: {e}")
+            return {'items': [], 'next_token': None}
+
 class InvestorLoginHistoryModel(DynamoDBModel):
     """Conversation history from InvestorLoginHistory_Prod table - email (HASH), time (RANGE)"""
     def __init__(self):

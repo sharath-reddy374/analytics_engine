@@ -547,22 +547,82 @@ async def admin_get_tenants():
 
 
 @app.get("/admin/users")
-async def admin_get_users(tenantName: Optional[str] = None, q: Optional[str] = None, limit: int = 100, offset: int = 0):
+async def admin_get_users(tenantName: Optional[str] = None, q: Optional[str] = None, limit: int = 100, offset: int = 0, nextToken: Optional[str] = None):
     """
     List users filtered by tenantName and optional search query (q).
     q matches on email, name, first_name, last_name (case-insensitive).
     """
     try:
+        # If tenantName is provided, use the new GSI for fast queries
+        if tenantName:
+            projection = ["email", "name", "first_name", "last_name", "tenantName"]
+            token_obj = None
+            if nextToken:
+                try:
+                    token_obj = json.loads(nextToken)
+                except Exception:
+                    token_obj = None
+
+            # Use begins_with on email sort key only when q looks like an email prefix
+            email_prefix = None
+            if q:
+                qs = q.strip()
+                if "@" in qs:
+                    email_prefix = qs.lower()
+
+            resp = dynamodb_access.investor_prod.get_users_by_tenant(
+                tenant_name=tenantName,
+                limit=int(limit),
+                next_token=token_obj,
+                email_prefix=email_prefix,
+                projection=projection,
+                scan_forward=True,
+            )
+            items = resp.get("items", []) or []
+
+            # If q provided but not used as email prefix, filter by name fields in-memory on this page
+            if q and not email_prefix:
+                ql = q.strip().lower()
+                filtered_items = []
+                for u in items:
+                    em = (u.get("email") or "")
+                    nm = (u.get("name") or "")
+                    fn = (u.get("first_name") or "")
+                    ln = (u.get("last_name") or "")
+                    hay = " ".join([em, nm, fn, ln]).lower()
+                    if ql in hay:
+                        filtered_items.append(u)
+                items = filtered_items
+
+            shaped = [
+                {
+                    "email": u.get("email"),
+                    "tenantName": (u.get("tenantName") or u.get("tenant") or "") or "",
+                    "first_name": u.get("first_name"),
+                    "last_name": u.get("last_name"),
+                    "name": u.get("name"),
+                }
+                for u in items
+            ]
+
+            # For token pagination we don't know total without an extra count; keep total as None
+            next_token = resp.get("next_token")
+            return {
+                "total": None,
+                "count": len(shaped),
+                "items": shaped,
+                "tenantName": tenantName,
+                "q": q,
+                "nextToken": json.dumps(next_token) if next_token else None,
+            }
+
+        # Fallback (no tenantName): keep existing scan-based behavior
         users = dynamodb_access.investor_prod.get_all_users() or []
         filtered = []
         ql = (q or "").strip().lower()
-        tnl = (tenantName or "").strip().lower()
 
         for u in users:
             tn = (u.get("tenantName") or u.get("tenant") or "") or ""
-            if tnl and tn.lower() != tnl:
-                continue
-
             if ql:
                 em = (u.get("email") or "").lower()
                 nm = (u.get("name") or "")

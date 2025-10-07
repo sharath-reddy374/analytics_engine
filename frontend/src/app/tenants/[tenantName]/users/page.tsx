@@ -5,7 +5,7 @@ export const revalidate = 0;
 
 type PageProps = {
   params: Promise<{ tenantName: string }>;
-  searchParams: Promise<{ q?: string; offset?: string; limit?: string }>;
+  searchParams: Promise<{ q?: string; offset?: string; limit?: string; nextToken?: string }>;
 };
 
 export default async function TenantUsersPage({ params, searchParams }: PageProps) {
@@ -15,8 +15,9 @@ export default async function TenantUsersPage({ params, searchParams }: PageProp
   const q = sp?.q || "";
   const limit = Number(sp?.limit || 50);
   const offset = Number(sp?.offset || 0);
+  const nextToken = sp?.nextToken;
 
-  const data: UsersResponse = await fetchUsersByTenant(tenantName, q, limit, offset);
+  const data: UsersResponse = await fetchUsersByTenant(tenantName, q, limit, offset, nextToken);
 
   return (
     <main style={{ padding: 24, maxWidth: 1080, margin: "0 auto" }}>
@@ -100,8 +101,22 @@ export default async function TenantUsersPage({ params, searchParams }: PageProp
         </table>
       </div>
 
+      {data.nextToken ? (
+        <div style={{ marginTop: 12 }}>
+          <Link
+            href={`/tenants/${encodeURIComponent(tenantName)}/users?${new URLSearchParams({
+              q: q || "",
+              limit: String(limit),
+              nextToken: data.nextToken || "",
+            }).toString()}`}
+          >
+            Next →
+          </Link>
+        </div>
+      ) : null}
+
       <div style={{ marginTop: 12, color: "#475569" }}>
-        Showing {data.count} of {data.total}
+        Showing {data.count}{data.total != null ? ` of ${data.total}` : ""}{data.nextToken ? " • more available" : ""}
       </div>
     </main>
   );
