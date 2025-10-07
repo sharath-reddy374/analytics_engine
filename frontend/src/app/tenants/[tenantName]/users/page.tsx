@@ -4,21 +4,23 @@ import { fetchUsersByTenant, type UsersResponse } from "@/lib/api";
 export const revalidate = 0;
 
 type PageProps = {
-  params: { tenantName: string };
-  searchParams?: { q?: string; offset?: string; limit?: string };
+  params: Promise<{ tenantName: string }>;
+  searchParams: Promise<{ q?: string; offset?: string; limit?: string }>;
 };
 
 export default async function TenantUsersPage({ params, searchParams }: PageProps) {
-  const tenantName = decodeURIComponent(params.tenantName);
-  const q = searchParams?.q || "";
-  const limit = Number(searchParams?.limit || 50);
-  const offset = Number(searchParams?.offset || 0);
+  const p = await params;
+  const sp = await searchParams;
+  const tenantName = decodeURIComponent(p.tenantName);
+  const q = sp?.q || "";
+  const limit = Number(sp?.limit || 50);
+  const offset = Number(sp?.offset || 0);
 
   const data: UsersResponse = await fetchUsersByTenant(tenantName, q, limit, offset);
 
   return (
     <main style={{ padding: 24, maxWidth: 1080, margin: "0 auto" }}>
-      <h1 style={{ marginBottom: 8 }}>Users – {tenantName}</h1>
+      <h1 style={{ marginBottom: 8, color: "#0f172a" }}>Users – {tenantName}</h1>
 
       <form
         action=""
@@ -41,9 +43,10 @@ export default async function TenantUsersPage({ params, searchParams }: PageProp
           type="submit"
           style={{
             padding: "8px 12px",
-            border: "1px solid #999",
+            border: "1px solid #1d4ed8",
             borderRadius: 6,
-            background: "#f5f5f5",
+            background: "#2563eb",
+            color: "#ffffff",
             cursor: "pointer",
           }}
         >
@@ -63,7 +66,7 @@ export default async function TenantUsersPage({ params, searchParams }: PageProp
           }}
         >
           <thead>
-            <tr style={{ background: "#fafafa" }}>
+            <tr style={{ background: "#eff6ff" }}>
               <th style={th}>Email</th>
               <th style={th}>Name</th>
               <th style={th}>Tenant</th>
@@ -97,7 +100,7 @@ export default async function TenantUsersPage({ params, searchParams }: PageProp
         </table>
       </div>
 
-      <div style={{ marginTop: 12, color: "#555" }}>
+      <div style={{ marginTop: 12, color: "#475569" }}>
         Showing {data.count} of {data.total}
       </div>
     </main>

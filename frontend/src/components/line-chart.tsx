@@ -22,7 +22,7 @@ type Props = {
 export function LineSeriesChart({ title, data, color = "#3b82f6" }: Props) {
   return (
     <div className="rounded-lg border border-border bg-card text-foreground p-4 shadow-sm">
-      <div className="mb-2 text-sm font-medium text-muted-foreground">{title}</div>
+      <div className="mb-2 text-sm font-medium text-slate-700">{title}</div>
       <div className="h-[260px]">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data}>

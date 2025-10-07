@@ -19,7 +19,7 @@ export default async function UserOverviewPage({ params }: PageProps) {
     <main style={{ padding: 24, maxWidth: 1200, margin: "0 auto" }}>
       <header style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
         <h1 style={{ marginBottom: 4 }}>User Overview</h1>
-        <code style={{ color: "#555" }}>{user?.email}</code>
+        <code style={{ color: "#1e3a8a" }}>{user?.email}</code>
       </header>
 
       <section style={{ marginTop: 16 }}>
@@ -255,7 +255,7 @@ const tdMono: React.CSSProperties = {
 const tdSmallJson: React.CSSProperties = {
   ...td,
   fontSize: 12,
-  color: "#333",
+  color: "#0f172a",
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
 };

@@ -6,8 +6,8 @@ import { ThemeProvider as NextThemesProvider, Attribute } from "next-themes";
 export function ThemeProvider({
   children,
   attribute = "class",
-  defaultTheme = "system",
-  enableSystem = true,
+  defaultTheme = "light",
+  enableSystem = false,
 }: {
   children: React.ReactNode;
   attribute?: Attribute;

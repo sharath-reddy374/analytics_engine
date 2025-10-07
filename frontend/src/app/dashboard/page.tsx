@@ -34,7 +34,7 @@ export default async function DashboardPage({ searchParams }: PageProps) {
     <main className="p-6 max-w-7xl mx-auto">
       <header className="mb-4 flex items-center gap-2">
         <h1 className="text-xl font-semibold">Analytics Overview</h1>
-        <span className="text-sm text-muted-foreground">(read-only)</span>
+        <span className="text-sm text-slate-500">(read-only)</span>
         <div className="ml-auto">
           <Link href="/" className="text-sm text-blue-600 hover:underline">
             ← Home
@@ -45,7 +45,7 @@ export default async function DashboardPage({ searchParams }: PageProps) {
       {/* Filters */}
       <form className="mb-5 flex flex-wrap gap-3 items-end" action="/dashboard" method="GET">
         <div className="flex flex-col">
-          <label className="text-sm text-muted-foreground mb-1" htmlFor="tenantName">
+          <label className="text-sm text-slate-600 mb-1" htmlFor="tenantName">
             Tenant
           </label>
           <select
@@ -64,7 +64,7 @@ export default async function DashboardPage({ searchParams }: PageProps) {
         </div>
 
         <div className="flex flex-col">
-          <label className="text-sm text-muted-foreground mb-1" htmlFor="days">
+          <label className="text-sm text-slate-600 mb-1" htmlFor="days">
             Date range
           </label>
           <select
@@ -81,7 +81,7 @@ export default async function DashboardPage({ searchParams }: PageProps) {
 
         <button
           type="submit"
-          className="border border-border rounded-md bg-secondary text-foreground px-3 py-1"
+          className="rounded-md bg-blue-600 text-white px-3 py-1 hover:bg-blue-700 transition-colors"
         >
           Apply
         </button>

@@ -10,34 +10,36 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        border: "hsl(214.3 31.8% 91.4%)",
-        input: "hsl(214.3 31.8% 91.4%)",
-        ring: "hsl(221.2 83.2% 53.3%)",
-        background: "hsl(0 0% 100%)",
-        foreground: "hsl(222.2 84% 4.9%)",
+        // White & Blue palette
+        border: "#e5e7eb", // slate-200
+        input: "#e5e7eb",
+        ring: "#2563eb", // blue-600
+        background: "#ffffff",
+        foreground: "#0f172a", // slate-900
+
         primary: {
-          DEFAULT: "hsl(221.2 83.2% 53.3%)",
-          foreground: "hsl(210 40% 98%)",
+          DEFAULT: "#2563eb", // blue-600
+          foreground: "#ffffff",
         },
         secondary: {
-          DEFAULT: "hsl(210 40% 96.1%)",
-          foreground: "hsl(222.2 47.4% 11.2%)",
+          DEFAULT: "#eff6ff", // blue-50
+          foreground: "#1e40af", // blue-800
         },
         muted: {
-          DEFAULT: "hsl(210 40% 96.1%)",
-          foreground: "hsl(215.4 16.3% 46.9%)",
+          DEFAULT: "#f1f5f9", // slate-100
+          foreground: "#475569", // slate-600 (darker than previous grey)
         },
         accent: {
-          DEFAULT: "hsl(210 40% 96.1%)",
-          foreground: "hsl(222.2 47.4% 11.2%)",
+          DEFAULT: "#dbeafe", // blue-100
+          foreground: "#1e3a8a", // blue-900
         },
         destructive: {
-          DEFAULT: "hsl(0 84.2% 60.2%)",
-          foreground: "hsl(210 40% 98%)",
+          DEFAULT: "#ef4444", // red-500
+          foreground: "#ffffff",
         },
         card: {
-          DEFAULT: "hsl(0 0% 100%)",
-          foreground: "hsl(222.2 84% 4.9%)",
+          DEFAULT: "#ffffff",
+          foreground: "#0f172a",
         },
       },
       borderRadius: {

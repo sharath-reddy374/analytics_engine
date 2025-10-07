@@ -7,6 +7,7 @@ import logging
 from typing import Optional, List, Any
 import typing as t
 from services.itp_icp_analyzer import ItpIcpAnalyzer
+from database.dynamodb_models import UserInfiniteTestSeriesModel
 
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class FeatureEngine:
         self.llm_service = LLMService()
         from services.itp_icp_analyzer import ItpIcpAnalyzer
         self.itp_icp = ItpIcpAnalyzer()
+        self.itp_series = UserInfiniteTestSeriesModel()
     
     def compute_user_features(self, email: str, events: List[Dict]) -> Dict[str, Any]:
         """
@@ -104,8 +106,83 @@ class FeatureEngine:
         except Exception as e:
             logger.error(f"ITP/ICP analyzer failed for {email}: {e}")
         
+        try:
+            features['tests_7d'] = self._count_tests_7d_dynamo(email)
+        except Exception as e:
+            logger.error(f"tests_7d dynamo count failed for {email}: {e}")
         return features
     
+    def _count_tests_7d_dynamo(self, email: str) -> int:
+        """
+        Count number of tests created in the last 7 days from DynamoDB table
+        User_Infinite_TestSeries_Prod using created_on/created_at timestamp.
+        """
+        if not email:
+            return 0
+        try:
+            items = self.itp_series.get_user_test_series(email, limit=1000) or []
+        except Exception:
+            return 0
+
+        from datetime import datetime, timezone, timedelta
+        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+
+        def parse_ts(obj) -> datetime:
+            """
+            Try common timestamp fields and formats:
+            - 'created_on', 'created_at', 'createdOn', 'createdAt', 'timestamp'
+            - ISO strings or 'YYYY-MM-DD,HH:MM:SS'
+            - Epoch millis/seconds
+            """
+            import math
+            if obj is None:
+                return None
+            # ISO-like string
+            if isinstance(obj, str):
+                s = obj.strip()
+                # Allow 'YYYY-MM-DD,HH:MM:SS'
+                if ',' in s and len(s.split(',')) == 2:
+                    try:
+                        return datetime.strptime(s, '%Y-%m-%d,%H:%M:%S').replace(tzinfo=timezone.utc)
+                    except Exception:
+                        pass
+                # Generic ISO 8601
+                try:
+                    return datetime.fromisoformat(s.replace('Z', '+00:00'))
+                except Exception:
+                    pass
+                return None
+            # Numeric epoch
+            if isinstance(obj, (int, float)) and not math.isnan(float(obj)):
+                # Heuristic: treat > 10^12 as ms
+                try:
+                    val = float(obj)
+                    if val > 1e12:
+                        return datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
+                    else:
+                        return datetime.fromtimestamp(val, tz=timezone.utc)
+                except Exception:
+                    return None
+            return None
+
+        count = 0
+        for it in items:
+            # check common keys
+            raw_ts = (
+                it.get('created_on')
+                or it.get('created_at')
+                or it.get('createdOn')
+                or it.get('createdAt')
+                or it.get('timestamp')
+                or it.get('ts')
+            )
+            dt = parse_ts(raw_ts)
+            if dt and dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt and dt >= week_ago:
+                count += 1
+        return count
+
     def _get_default_features(self) -> Dict[str, Any]:
         """Return default features when no events are available"""
         return {
@@ -300,13 +377,27 @@ class FeatureEngine:
 
         minutes_7d = self._calculate_login_minutes(login_events, convo_events_recent) 
         
-        # Test attempts in last 7 days
-        tests_7d = db.query(func.count(Event.event_id)).filter(
-            Event.user_id == user_id,
-            Event.ts >= week_ago,
-            Event.ts <= today,
-            Event.name == 'test_attempt'
-        ).scalar() or 0
+        # Tests created in last 7 days from DynamoDB User_Infinite_TestSeries_Prod by created_on
+        tests_7d = 0
+        try:
+            user_row = db.query(AppUser).filter(AppUser.user_id == user_id).first()
+            user_email = getattr(user_row, "email", None) if user_row else None
+            if user_email:
+                tests_7d = self._count_tests_7d_dynamo(user_email)
+            else:
+                tests_7d = db.query(func.count(Event.event_id)).filter(
+                    Event.user_id == user_id,
+                    Event.ts >= week_ago,
+                    Event.ts <= today,
+                    Event.name == 'test_attempt'
+                ).scalar() or 0
+        except Exception:
+            tests_7d = db.query(func.count(Event.event_id)).filter(
+                Event.user_id == user_id,
+                Event.ts >= week_ago,
+                Event.ts <= today,
+                Event.name == 'test_attempt'
+            ).scalar() or 0
         
         # Average score change over 30 days
         avg_score_change_30d = self._calculate_score_trend(user_id, month_ago, today, db)
